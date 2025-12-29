@@ -202,15 +202,6 @@ static void trap(VM* vm, uint32_t code, const char* msg) {
   vm->trap_msg = msg;
 }
 
-static int check_ip(VM* vm, uint32_t need) {
-  // need bytes available starting at ip
-  if (vm->ip + need > vm->code_size) {
-    trap(vm, 0xFFFF0001u, "IP out of range");
-    return 0;
-  }
-  return 1;
-}
-
 static int check_stack_push(VM* vm, uint32_t n) {
   if (vm->sp + n > vm->stack_cap) {
     trap(vm, 0xFFFF0002u, "stack overflow");
@@ -242,14 +233,6 @@ static int mem_range_ok(VM* vm, uint32_t addr, uint32_t len) {
   if (len > vm->mem_size) return 0;
   if (addr + len < addr) return 0; // overflow
   return addr + len <= vm->mem_size;
-}
-
-static int mem_addr_ok(VM* vm, uint32_t addr) {
-  return addr < vm->mem_size;
-}
-
-static int mem_addr32_ok(VM* vm, uint32_t addr) {
-  return addr + 4u <= vm->mem_size;
 }
 
 static uint32_t mask_shift(uint32_t s) { return s & 31u; }
@@ -333,505 +316,566 @@ static void do_syscall(VM* vm, uint8_t id) {
 // ------------------------------ Dispatch ------------------------------
 
 static void step(VM* vm) {
-  if (!check_ip(vm, 1)) return;
-  uint8_t op = vm->code[vm->ip++];
+  // Cache hot fields in locals (helps WASM and native).
+  uint8_t* code = vm->code;
+  uint32_t code_size = vm->code_size;
+  uint8_t* mem = vm->mem;
+  uint32_t mem_size = vm->mem_size;
+  uint32_t* stack = vm->stack;
+  uint32_t stack_cap = vm->stack_cap;
+  uint32_t ip = vm->ip;
+  uint32_t sp = vm->sp;
+  uint32_t fp = vm->fp;
+
+#define TRAP(_code, _msg) do { trap(vm, (_code), (_msg)); goto end; } while (0)
+#define CHECK_IP(_need) do { if (ip + (uint32_t)(_need) > code_size) TRAP(0xFFFF0001u, "IP out of range"); } while (0)
+#define CHECK_PUSH(_n) do { if (sp + (uint32_t)(_n) > stack_cap) TRAP(0xFFFF0002u, "stack overflow"); } while (0)
+#define CHECK_POP(_n) do { if (sp < (uint32_t)(_n)) TRAP(0xFFFF0003u, "stack underflow"); } while (0)
+#define PUSH(_v) do { stack[sp++] = (_v); } while (0)
+#define POP() (stack[--sp])
+
+#define MEM_RANGE_OK(_addr, _len) \
+  ((_len) == 0u || \
+   ((_addr) <= mem_size && \
+    (_len) <= mem_size && \
+    ((_addr) + (_len)) >= (_addr) && \
+    ((_addr) + (_len)) <= mem_size))
+
+#define MEM_ADDR_OK(_addr) ((_addr) < mem_size)
+#define MEM_ADDR32_OK(_addr) (((_addr) + 4u) <= mem_size)
+
+  CHECK_IP(1);
+  uint8_t op = code[ip++];
 
   switch (op) {
     // 0x00 NOP
-    case 0x00: return;
+    case 0x00:
+      break;
 
     // 0x01 HALT
     case 0x01:
       vm->halted = 1;
       vm->trap_code = 0;
       vm->trap_msg = "halt";
-      return;
+      goto end;
 
     // 0x02 SYSCALL u8
     case 0x02: {
-      if (!check_ip(vm, 1)) return;
-      uint8_t id = vm->code[vm->ip++];
+      CHECK_IP(1);
+      uint8_t id = code[ip++];
+      // Sync locals before calling helper.
+      vm->ip = ip;
+      vm->sp = sp;
+      vm->fp = fp;
       do_syscall(vm, id);
-      return;
+      // Reload locals after syscall.
+      ip = vm->ip;
+      sp = vm->sp;
+      fp = vm->fp;
+      // Fast-path reload of pointers in case VM was reinitialized (shouldn't happen here).
+      code = vm->code;
+      code_size = vm->code_size;
+      mem = vm->mem;
+      mem_size = vm->mem_size;
+      stack = vm->stack;
+      stack_cap = vm->stack_cap;
+      break;
     }
 
     // 0x03 TRAP u16
     case 0x03: {
-      if (!check_ip(vm, 2)) return;
-      uint16_t tc = read_u16_le(vm->code + vm->ip);
-      vm->ip += 2;
+      CHECK_IP(2);
+      uint16_t tc = read_u16_le(code + ip);
+      ip += 2;
       trap(vm, (uint32_t)tc, "TRAP");
-      return;
+      goto end;
     }
 
     // 0x04 JMP addr32
     case 0x04: {
-      if (!check_ip(vm, 4)) return;
-      uint32_t a = read_u32_le(vm->code + vm->ip);
-      vm->ip = a;
-      if (vm->ip >= vm->code_size) trap(vm, 0xFFFF0004u, "JMP to invalid address");
-      return;
+      CHECK_IP(4);
+      uint32_t a = read_u32_le(code + ip);
+      ip = a;
+      if (ip >= code_size) TRAP(0xFFFF0004u, "JMP to invalid address");
+      break;
     }
 
     // 0x05 JZ addr32
     case 0x05: {
-      if (!check_ip(vm, 4)) return;
-      uint32_t a = read_u32_le(vm->code + vm->ip);
-      vm->ip += 4;
-      if (!check_stack_pop(vm, 1)) return;
-      uint32_t c = pop(vm);
+      CHECK_IP(4);
+      uint32_t a = read_u32_le(code + ip);
+      ip += 4;
+      CHECK_POP(1);
+      uint32_t c = POP();
       if (c == 0) {
-        vm->ip = a;
-        if (vm->ip >= vm->code_size) trap(vm, 0xFFFF0005u, "JZ to invalid address");
+        ip = a;
+        if (ip >= code_size) TRAP(0xFFFF0005u, "JZ to invalid address");
       }
-      return;
+      break;
     }
 
     // 0x06 JNZ addr32
     case 0x06: {
-      if (!check_ip(vm, 4)) return;
-      uint32_t a = read_u32_le(vm->code + vm->ip);
-      vm->ip += 4;
-      if (!check_stack_pop(vm, 1)) return;
-      uint32_t c = pop(vm);
+      CHECK_IP(4);
+      uint32_t a = read_u32_le(code + ip);
+      ip += 4;
+      CHECK_POP(1);
+      uint32_t c = POP();
       if (c != 0) {
-        vm->ip = a;
-        if (vm->ip >= vm->code_size) trap(vm, 0xFFFF0006u, "JNZ to invalid address");
+        ip = a;
+        if (ip >= code_size) TRAP(0xFFFF0006u, "JNZ to invalid address");
       }
-      return;
+      break;
     }
 
     // 0x07 PUSHI u32
     case 0x07: {
-      if (!check_ip(vm, 4)) return;
-      uint32_t imm = read_u32_le(vm->code + vm->ip);
-      vm->ip += 4;
-      if (!check_stack_push(vm, 1)) return;
-      push(vm, imm);
-      return;
+      CHECK_IP(4);
+      uint32_t imm = read_u32_le(code + ip);
+      ip += 4;
+      CHECK_PUSH(1);
+      PUSH(imm);
+      break;
     }
 
     // 0x08 POP
     case 0x08:
-      if (!check_stack_pop(vm, 1)) return;
-      vm->sp--;
-      return;
+      CHECK_POP(1);
+      sp--;
+      break;
 
     // 0x09 DUP
     case 0x09:
-      if (!check_stack_pop(vm, 1) || !check_stack_push(vm, 1)) return;
-      push(vm, vm->stack[vm->sp - 1]);
-      return;
+      CHECK_POP(1);
+      CHECK_PUSH(1);
+      {
+        uint32_t t = stack[sp - 1];
+        PUSH(t);
+      }
+      break;
 
     // 0x0A DUP2
     case 0x0A:
-      if (!check_stack_pop(vm, 2) || !check_stack_push(vm, 2)) return;
+      CHECK_POP(2);
+      CHECK_PUSH(2);
       {
-        uint32_t a = vm->stack[vm->sp - 2];
-        uint32_t b = vm->stack[vm->sp - 1];
-        push(vm, a);
-        push(vm, b);
+        uint32_t a = stack[sp - 2];
+        uint32_t b = stack[sp - 1];
+        PUSH(a);
+        PUSH(b);
       }
-      return;
+      break;
 
     // 0x0B SWAP
     case 0x0B:
-      if (!check_stack_pop(vm, 2)) return;
+      CHECK_POP(2);
       {
-        uint32_t b = pop(vm);
-        uint32_t a = pop(vm);
-        push(vm, b);
-        push(vm, a);
+        uint32_t b = POP();
+        uint32_t a = POP();
+        PUSH(b);
+        PUSH(a);
       }
-      return;
+      break;
 
     // 0x0C ROT: a b c -> b c a
     case 0x0C:
-      if (!check_stack_pop(vm, 3)) return;
+      CHECK_POP(3);
       {
-        uint32_t c = pop(vm);
-        uint32_t b = pop(vm);
-        uint32_t a = pop(vm);
-        push(vm, b);
-        push(vm, c);
-        push(vm, a);
+        uint32_t c = POP();
+        uint32_t b = POP();
+        uint32_t a = POP();
+        PUSH(b);
+        PUSH(c);
+        PUSH(a);
       }
-      return;
+      break;
 
     // 0x0D OVER: a b -> a b a
     case 0x0D:
-      if (!check_stack_pop(vm, 2) || !check_stack_push(vm, 1)) return;
-      push(vm, vm->stack[vm->sp - 2]);
-      return;
+      CHECK_POP(2);
+      CHECK_PUSH(1);
+      {
+        uint32_t t = stack[sp - 2];
+        PUSH(t);
+      }
+      break;
 
     // 0x0E CALL addr32
     case 0x0E: {
-      if (!check_ip(vm, 4)) return;
-      uint32_t target = read_u32_le(vm->code + vm->ip);
-      vm->ip += 4;
-      if (target >= vm->code_size) { trap(vm, 0xFFFF000Eu, "CALL to invalid address"); return; }
-      if (!check_stack_push(vm, 2)) return;
-      uint32_t ret_ip = vm->ip;
-      push(vm, ret_ip);
-      push(vm, vm->fp);
-      vm->fp = vm->sp;
-      vm->ip = target;
-      return;
+      CHECK_IP(4);
+      uint32_t target = read_u32_le(code + ip);
+      ip += 4;
+      if (target >= code_size) TRAP(0xFFFF000Eu, "CALL to invalid address");
+      CHECK_PUSH(2);
+      uint32_t ret_ip = ip;
+      PUSH(ret_ip);
+      PUSH(fp);
+      fp = sp;
+      ip = target;
+      break;
     }
 
     // 0x2E CALLI (addr on stack)
     case 0x2E: {
-      if (!check_stack_pop(vm, 1)) return;
-      uint32_t target = pop(vm);
-      if (target >= vm->code_size) { trap(vm, 0xFFFF002Eu, "CALLI to invalid address"); return; }
-      if (!check_stack_push(vm, 2)) return;
-      uint32_t ret_ip = vm->ip;
-      push(vm, ret_ip);
-      push(vm, vm->fp);
-      vm->fp = vm->sp;
-      vm->ip = target;
-      return;
+      CHECK_POP(1);
+      uint32_t target = POP();
+      if (target >= code_size) TRAP(0xFFFF002Eu, "CALLI to invalid address");
+      CHECK_PUSH(2);
+      uint32_t ret_ip = ip;
+      PUSH(ret_ip);
+      PUSH(fp);
+      fp = sp;
+      ip = target;
+      break;
     }
 
     // 0x10 ENTER u16
     case 0x10: {
-      if (!check_ip(vm, 2)) return;
-      uint16_t nlocals = read_u16_le(vm->code + vm->ip);
-      vm->ip += 2;
-      if (!check_stack_push(vm, nlocals)) return;
-      // deterministic: zero locals
-      for (uint16_t i = 0; i < nlocals; i++) push(vm, 0);
-      return;
+      CHECK_IP(2);
+      uint16_t nlocals = read_u16_le(code + ip);
+      ip += 2;
+      CHECK_PUSH(nlocals);
+      for (uint16_t i = 0; i < nlocals; i++) PUSH(0);
+      break;
     }
 
     // 0x11 LEAVE
     case 0x11:
-      if (vm->fp > vm->sp) { trap(vm, 0xFFFF0011u, "LEAVE with corrupted fp"); return; }
-      vm->sp = vm->fp;
-      return;
+      if (fp > sp) TRAP(0xFFFF0011u, "LEAVE with corrupted fp");
+      sp = fp;
+      break;
 
     // 0x12 LDFP s16
     case 0x12: {
-      if (!check_ip(vm, 2)) return;
-      int16_t off = read_s16_le(vm->code + vm->ip);
-      vm->ip += 2;
-      int64_t idx = (int64_t)vm->fp + (int64_t)off;
-      if (idx < 0 || idx >= (int64_t)vm->sp) { trap(vm, 0xFFFF0012u, "LDFP index out of range"); return; }
-      if (!check_stack_push(vm, 1)) return;
-      push(vm, vm->stack[(uint32_t)idx]);
-      return;
+      CHECK_IP(2);
+      int16_t off = read_s16_le(code + ip);
+      ip += 2;
+      int64_t idx = (int64_t)fp + (int64_t)off;
+      if (idx < 0 || idx >= (int64_t)sp) TRAP(0xFFFF0012u, "LDFP index out of range");
+      CHECK_PUSH(1);
+      PUSH(stack[(uint32_t)idx]);
+      break;
     }
 
     // 0x13 STFP s16
     case 0x13: {
-      if (!check_ip(vm, 2)) return;
-      int16_t off = read_s16_le(vm->code + vm->ip);
-      vm->ip += 2;
-      if (!check_stack_pop(vm, 1)) return;
-      uint32_t val = pop(vm);
-      int64_t idx = (int64_t)vm->fp + (int64_t)off;
-      if (idx < 0 || idx >= (int64_t)vm->sp) { trap(vm, 0xFFFF0013u, "STFP index out of range"); return; }
-      vm->stack[(uint32_t)idx] = val;
-      return;
+      CHECK_IP(2);
+      int16_t off = read_s16_le(code + ip);
+      ip += 2;
+      CHECK_POP(1);
+      uint32_t val = POP();
+      int64_t idx = (int64_t)fp + (int64_t)off;
+      if (idx < 0 || idx >= (int64_t)sp) TRAP(0xFFFF0013u, "STFP index out of range");
+      stack[(uint32_t)idx] = val;
+      break;
     }
 
     // 0x0F RET u8
     case 0x0F: {
-      if (!check_ip(vm, 1)) return;
-      uint8_t argc = vm->code[vm->ip++];
-      if (!check_stack_pop(vm, 1)) return;
-      uint32_t rv = pop(vm);
+      CHECK_IP(1);
+      uint8_t argc = code[ip++];
+      CHECK_POP(1);
+      uint32_t rv = POP();
 
-      if (vm->fp > vm->sp) { trap(vm, 0xFFFF000Fu, "RET with corrupted fp"); return; }
-      vm->sp = vm->fp;
+      if (fp > sp) TRAP(0xFFFF000Fu, "RET with corrupted fp");
+      sp = fp;
 
-      // Need old_fp and ret_ip on stack
-      if (!check_stack_pop(vm, 2)) return;
-      uint32_t old_fp = pop(vm);
-      uint32_t ret_ip = pop(vm);
+      CHECK_POP(2);
+      uint32_t old_fp = POP();
+      uint32_t ret_ip = POP();
 
-      if (vm->sp < argc) { trap(vm, 0xFFFF000Fu, "RET argc underflow"); return; }
-      vm->sp -= argc;
+      if (sp < (uint32_t)argc) TRAP(0xFFFF000Fu, "RET argc underflow");
+      sp -= (uint32_t)argc;
 
-      if (!check_stack_push(vm, 1)) return;
-      push(vm, rv);
+      CHECK_PUSH(1);
+      PUSH(rv);
 
-      vm->fp = old_fp;
-      vm->ip = ret_ip;
-      if (vm->ip > vm->code_size) { trap(vm, 0xFFFF000Fu, "RET to invalid ip"); return; }
-      return;
+      fp = old_fp;
+      ip = ret_ip;
+      if (ip > code_size) TRAP(0xFFFF000Fu, "RET to invalid ip");
+      break;
     }
 
     // 0x2F TAILCALL addr32
     case 0x2F: {
-      if (!check_ip(vm, 4)) return;
-      uint32_t target = read_u32_le(vm->code + vm->ip);
-      vm->ip = target;
-      if (vm->ip >= vm->code_size) trap(vm, 0xFFFF002Fu, "TAILCALL to invalid address");
-      return;
+      CHECK_IP(4);
+      uint32_t target = read_u32_le(code + ip);
+      ip = target;
+      if (ip >= code_size) TRAP(0xFFFF002Fu, "TAILCALL to invalid address");
+      break;
     }
 
     // 0x14 LOAD32
     case 0x14: {
-      if (!check_stack_pop(vm, 1)) return;
-      uint32_t addr = pop(vm);
-      if (!mem_addr32_ok(vm, addr)) { trap(vm, 0xFFFF0014u, "LOAD32 OOB"); return; }
-      uint32_t v = read_u32_mem_le(vm->mem, addr);
-      if (!check_stack_push(vm, 1)) return;
-      push(vm, v);
-      return;
+      CHECK_POP(1);
+      uint32_t addr = POP();
+      if (!MEM_ADDR32_OK(addr)) TRAP(0xFFFF0014u, "LOAD32 OOB");
+      uint32_t v = read_u32_mem_le(mem, addr);
+      CHECK_PUSH(1);
+      PUSH(v);
+      break;
     }
 
     // 0x15 STORE32
     case 0x15: {
-      if (!check_stack_pop(vm, 2)) return;
-      uint32_t val = pop(vm);
-      uint32_t addr = pop(vm);
-      if (!mem_addr32_ok(vm, addr)) { trap(vm, 0xFFFF0015u, "STORE32 OOB"); return; }
-      write_u32_mem_le(vm->mem, addr, val);
-      return;
+      CHECK_POP(2);
+      uint32_t val = POP();
+      uint32_t addr = POP();
+      if (!MEM_ADDR32_OK(addr)) TRAP(0xFFFF0015u, "STORE32 OOB");
+      write_u32_mem_le(mem, addr, val);
+      break;
     }
 
     // 0x16 LOAD8U
     case 0x16: {
-      if (!check_stack_pop(vm, 1)) return;
-      uint32_t addr = pop(vm);
-      if (!mem_addr_ok(vm, addr)) { trap(vm, 0xFFFF0016u, "LOAD8U OOB"); return; }
-      if (!check_stack_push(vm, 1)) return;
-      push(vm, (uint32_t)vm->mem[addr]);
-      return;
+      CHECK_POP(1);
+      uint32_t addr = POP();
+      if (!MEM_ADDR_OK(addr)) TRAP(0xFFFF0016u, "LOAD8U OOB");
+      CHECK_PUSH(1);
+      PUSH((uint32_t)mem[addr]);
+      break;
     }
 
     // 0x17 STORE8
     case 0x17: {
-      if (!check_stack_pop(vm, 2)) return;
-      uint32_t val = pop(vm);
-      uint32_t addr = pop(vm);
-      if (!mem_addr_ok(vm, addr)) { trap(vm, 0xFFFF0017u, "STORE8 OOB"); return; }
-      vm->mem[addr] = (uint8_t)(val & 0xFFu);
-      return;
+      CHECK_POP(2);
+      uint32_t val = POP();
+      uint32_t addr = POP();
+      if (!MEM_ADDR_OK(addr)) TRAP(0xFFFF0017u, "STORE8 OOB");
+      mem[addr] = (uint8_t)(val & 0xFFu);
+      break;
     }
 
     // 0x18 MEMCPY (memmove semantics): dest src len ->
     case 0x18: {
-      if (!check_stack_pop(vm, 3)) return;
-      uint32_t len  = pop(vm);
-      uint32_t src  = pop(vm);
-      uint32_t dest = pop(vm);
-      if (!mem_range_ok(vm, src, len) || !mem_range_ok(vm, dest, len)) {
-        trap(vm, 0xFFFF0018u, "MEMCPY OOB");
-        return;
-      }
-      memmove(vm->mem + dest, vm->mem + src, (size_t)len);
-      return;
+      CHECK_POP(3);
+      uint32_t len  = POP();
+      uint32_t src  = POP();
+      uint32_t dest = POP();
+      if (!MEM_RANGE_OK(src, len) || !MEM_RANGE_OK(dest, len)) TRAP(0xFFFF0018u, "MEMCPY OOB");
+      memmove(mem + dest, mem + src, (size_t)len);
+      break;
     }
 
     // 0x19 ADD
     case 0x19: {
-      if (!check_stack_pop(vm, 2)) return;
-      uint32_t b = pop(vm), a = pop(vm);
-      push(vm, a + b);
-      return;
+      CHECK_POP(2);
+      uint32_t b = POP(), a = POP();
+      PUSH(a + b);
+      break;
     }
 
     // 0x1A SUB
     case 0x1A: {
-      if (!check_stack_pop(vm, 2)) return;
-      uint32_t b = pop(vm), a = pop(vm);
-      push(vm, a - b);
-      return;
+      CHECK_POP(2);
+      uint32_t b = POP(), a = POP();
+      PUSH(a - b);
+      break;
     }
 
     // 0x1B MUL
     case 0x1B: {
-      if (!check_stack_pop(vm, 2)) return;
-      uint32_t b = pop(vm), a = pop(vm);
-      push(vm, a * b);
-      return;
+      CHECK_POP(2);
+      uint32_t b = POP(), a = POP();
+      PUSH(a * b);
+      break;
     }
 
     // 0x1C DIVS (signed)
     case 0x1C: {
-      if (!check_stack_pop(vm, 2)) return;
-      int32_t b = (int32_t)pop(vm);
-      int32_t a = (int32_t)pop(vm);
-      if (b == 0) { trap(vm, 0xFFFF001Cu, "DIVS divide by zero"); return; }
-      // optional determinism trap: INT_MIN / -1
-      if (a == (int32_t)0x80000000 && b == -1) { trap(vm, 0xFFFF001Cu, "DIVS overflow"); return; }
-      push(vm, (uint32_t)(a / b));
-      return;
+      CHECK_POP(2);
+      int32_t b = (int32_t)POP();
+      int32_t a = (int32_t)POP();
+      if (b == 0) TRAP(0xFFFF001Cu, "DIVS divide by zero");
+      if (a == (int32_t)0x80000000 && b == -1) TRAP(0xFFFF001Cu, "DIVS overflow");
+      PUSH((uint32_t)(a / b));
+      break;
     }
 
     // 0x1D NEG
     case 0x1D: {
-      if (!check_stack_pop(vm, 1)) return;
-      uint32_t a = pop(vm);
-      push(vm, (uint32_t)(-(int32_t)a));
-      return;
+      CHECK_POP(1);
+      uint32_t a = POP();
+      PUSH((uint32_t)(-(int32_t)a));
+      break;
     }
 
     // 0x1E AND
     case 0x1E: {
-      if (!check_stack_pop(vm, 2)) return;
-      uint32_t b = pop(vm), a = pop(vm);
-      push(vm, a & b);
-      return;
+      CHECK_POP(2);
+      uint32_t b = POP(), a = POP();
+      PUSH(a & b);
+      break;
     }
 
     // 0x1F OR
     case 0x1F: {
-      if (!check_stack_pop(vm, 2)) return;
-      uint32_t b = pop(vm), a = pop(vm);
-      push(vm, a | b);
-      return;
+      CHECK_POP(2);
+      uint32_t b = POP(), a = POP();
+      PUSH(a | b);
+      break;
     }
 
     // 0x20 XOR
     case 0x20: {
-      if (!check_stack_pop(vm, 2)) return;
-      uint32_t b = pop(vm), a = pop(vm);
-      push(vm, a ^ b);
-      return;
+      CHECK_POP(2);
+      uint32_t b = POP(), a = POP();
+      PUSH(a ^ b);
+      break;
     }
 
     // 0x21 SHL
     case 0x21: {
-      if (!check_stack_pop(vm, 2)) return;
-      uint32_t sh = pop(vm), v = pop(vm);
-      push(vm, v << mask_shift(sh));
-      return;
+      CHECK_POP(2);
+      uint32_t sh = POP(), v = POP();
+      PUSH(v << mask_shift(sh));
+      break;
     }
 
     // 0x22 SHR (logical)
     case 0x22: {
-      if (!check_stack_pop(vm, 2)) return;
-      uint32_t sh = pop(vm), v = pop(vm);
-      push(vm, v >> mask_shift(sh));
-      return;
+      CHECK_POP(2);
+      uint32_t sh = POP(), v = POP();
+      PUSH(v >> mask_shift(sh));
+      break;
     }
 
     // 0x23 EQ
     case 0x23: {
-      if (!check_stack_pop(vm, 2)) return;
-      uint32_t b = pop(vm), a = pop(vm);
-      push(vm, (a == b) ? 1u : 0u);
-      return;
+      CHECK_POP(2);
+      uint32_t b = POP(), a = POP();
+      PUSH((a == b) ? 1u : 0u);
+      break;
     }
 
     // 0x24 LT (signed)
     case 0x24: {
-      if (!check_stack_pop(vm, 2)) return;
-      int32_t b = (int32_t)pop(vm), a = (int32_t)pop(vm);
-      push(vm, (a < b) ? 1u : 0u);
-      return;
+      CHECK_POP(2);
+      int32_t b = (int32_t)POP(), a = (int32_t)POP();
+      PUSH((a < b) ? 1u : 0u);
+      break;
     }
 
     // 0x25 GT (signed)
     case 0x25: {
-      if (!check_stack_pop(vm, 2)) return;
-      int32_t b = (int32_t)pop(vm), a = (int32_t)pop(vm);
-      push(vm, (a > b) ? 1u : 0u);
-      return;
+      CHECK_POP(2);
+      int32_t b = (int32_t)POP(), a = (int32_t)POP();
+      PUSH((a > b) ? 1u : 0u);
+      break;
     }
 
     // 0x26 LE (signed)
     case 0x26: {
-      if (!check_stack_pop(vm, 2)) return;
-      int32_t b = (int32_t)pop(vm), a = (int32_t)pop(vm);
-      push(vm, (a <= b) ? 1u : 0u);
-      return;
+      CHECK_POP(2);
+      int32_t b = (int32_t)POP(), a = (int32_t)POP();
+      PUSH((a <= b) ? 1u : 0u);
+      break;
     }
 
     // 0x27 GE (signed)
     case 0x27: {
-      if (!check_stack_pop(vm, 2)) return;
-      int32_t b = (int32_t)pop(vm), a = (int32_t)pop(vm);
-      push(vm, (a >= b) ? 1u : 0u);
-      return;
+      CHECK_POP(2);
+      int32_t b = (int32_t)POP(), a = (int32_t)POP();
+      PUSH((a >= b) ? 1u : 0u);
+      break;
     }
 
     // 0x28 ADDI s16
     case 0x28: {
-      if (!check_ip(vm, 2)) return;
-      int16_t imm = read_s16_le(vm->code + vm->ip);
-      vm->ip += 2;
-      if (!check_stack_pop(vm, 1)) return;
-      uint32_t x = pop(vm);
-      push(vm, x + (uint32_t)(int32_t)imm);
-      return;
+      CHECK_IP(2);
+      int16_t imm = read_s16_le(code + ip);
+      ip += 2;
+      CHECK_POP(1);
+      uint32_t x = POP();
+      PUSH(x + (uint32_t)(int32_t)imm);
+      break;
     }
 
     // 0x29 SUBI s16
     case 0x29: {
-      if (!check_ip(vm, 2)) return;
-      int16_t imm = read_s16_le(vm->code + vm->ip);
-      vm->ip += 2;
-      if (!check_stack_pop(vm, 1)) return;
-      uint32_t x = pop(vm);
-      push(vm, x - (uint32_t)(int32_t)imm);
-      return;
+      CHECK_IP(2);
+      int16_t imm = read_s16_le(code + ip);
+      ip += 2;
+      CHECK_POP(1);
+      uint32_t x = POP();
+      PUSH(x - (uint32_t)(int32_t)imm);
+      break;
     }
 
     // 0x2A INC
     case 0x2A:
-      if (!check_stack_pop(vm, 1)) return;
-      vm->stack[vm->sp - 1] = vm->stack[vm->sp - 1] + 1u;
-      return;
+      CHECK_POP(1);
+      stack[sp - 1] = stack[sp - 1] + 1u;
+      break;
 
     // 0x2B DEC
     case 0x2B:
-      if (!check_stack_pop(vm, 1)) return;
-      vm->stack[vm->sp - 1] = vm->stack[vm->sp - 1] - 1u;
-      return;
+      CHECK_POP(1);
+      stack[sp - 1] = stack[sp - 1] - 1u;
+      break;
 
     // 0x2C MODS (signed)
     case 0x2C: {
-      if (!check_stack_pop(vm, 2)) return;
-      int32_t b = (int32_t)pop(vm);
-      int32_t a = (int32_t)pop(vm);
-      if (b == 0) { trap(vm, 0xFFFF002Cu, "MODS divide by zero"); return; }
-      push(vm, (uint32_t)(a % b));
-      return;
+      CHECK_POP(2);
+      int32_t b = (int32_t)POP();
+      int32_t a = (int32_t)POP();
+      if (b == 0) TRAP(0xFFFF002Cu, "MODS divide by zero");
+      PUSH((uint32_t)(a % b));
+      break;
     }
 
     // 0x2D NOT
     case 0x2D:
-      if (!check_stack_pop(vm, 1)) return;
-      vm->stack[vm->sp - 1] = ~vm->stack[vm->sp - 1];
-      return;
+      CHECK_POP(1);
+      stack[sp - 1] = ~stack[sp - 1];
+      break;
 
     // 0x30 LOAD_OFF s16 : base -> load32(base+imm)
     case 0x30: {
-      if (!check_ip(vm, 2)) return;
-      int16_t imm = read_s16_le(vm->code + vm->ip);
-      vm->ip += 2;
-      if (!check_stack_pop(vm, 1)) return;
-      uint32_t base = pop(vm);
+      CHECK_IP(2);
+      int16_t imm = read_s16_le(code + ip);
+      ip += 2;
+      CHECK_POP(1);
+      uint32_t base = POP();
       uint32_t addr = base + (uint32_t)(int32_t)imm;
-      if (!mem_addr32_ok(vm, addr)) { trap(vm, 0xFFFF0030u, "LOAD_OFF OOB"); return; }
-      uint32_t v = read_u32_mem_le(vm->mem, addr);
-      push(vm, v);
-      return;
+      if (!MEM_ADDR32_OK(addr)) TRAP(0xFFFF0030u, "LOAD_OFF OOB");
+      uint32_t v = read_u32_mem_le(mem, addr);
+      PUSH(v);
+      break;
     }
 
     // 0x31 STORE_OFF s16 : base value -> store32(base+imm, value)
     case 0x31: {
-      if (!check_ip(vm, 2)) return;
-      int16_t imm = read_s16_le(vm->code + vm->ip);
-      vm->ip += 2;
-      if (!check_stack_pop(vm, 2)) return;
-      uint32_t val = pop(vm);
-      uint32_t base = pop(vm);
+      CHECK_IP(2);
+      int16_t imm = read_s16_le(code + ip);
+      ip += 2;
+      CHECK_POP(2);
+      uint32_t val = POP();
+      uint32_t base = POP();
       uint32_t addr = base + (uint32_t)(int32_t)imm;
-      if (!mem_addr32_ok(vm, addr)) { trap(vm, 0xFFFF0031u, "STORE_OFF OOB"); return; }
-      write_u32_mem_le(vm->mem, addr, val);
-      return;
+      if (!MEM_ADDR32_OK(addr)) TRAP(0xFFFF0031u, "STORE_OFF OOB");
+      write_u32_mem_le(mem, addr, val);
+      break;
     }
 
     default:
-      trap(vm, 0xFFFF00FEu, "unknown opcode");
-      return;
+      TRAP(0xFFFF00FEu, "unknown opcode");
   }
+
+end:
+  vm->ip = ip;
+  vm->sp = sp;
+  vm->fp = fp;
+
+#undef MEM_ADDR32_OK
+#undef MEM_ADDR_OK
+#undef MEM_RANGE_OK
+#undef POP
+#undef PUSH
+#undef CHECK_POP
+#undef CHECK_PUSH
+#undef CHECK_IP
+#undef TRAP
 }
 
 // ------------------------------ VM API (buffer-based) ------------------------------
