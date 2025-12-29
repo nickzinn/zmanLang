@@ -1,10 +1,3 @@
-
-Absolutely. Here’s a practical assembler syntax for your StackVM-32 that’s easy to implement (single pass + fixups) and pleasant to write by hand.
-
-You can drop this in your repo as ASM.md.
-
-⸻
-
 StackVM-32 Assembler Syntax (v1)
 
 1) File structure
@@ -341,8 +334,3 @@ Example encoding rules:
     •    JMP L   → [0x04] + u32(addr(L))
     •    LDFP -4 → [0x12] + s16(-4)
 
-⸻
-
-If you want, I can also write:
-    1.    a formal grammar (EBNF) for the assembler, and
-    2.    a tiny reference assembler/disassembler in Python or C to bootstrap your toolchain.

@@ -594,10 +594,3 @@ At function entry (before ENTER):
 Locals after ENTER 2:
     •    local0 at fp+0
     •    local1 at fp+1
-
-⸻
-
-If you want, I can also generate:
-    •    a matching assembler syntax (labels, .func, .const, etc.)
-    •    a tiny bytecode disassembler table from the opcode map above
-    •    reference interpreter pseudocode (or C) for the main dispatch loop and call/ret paths
