@@ -1,0 +1,53 @@
+# Compiled object files
+*.o
+*.obj
+
+# Compiled executables
+bin/
+svm_asm
+svm_disasm
+svm_vm
+
+# Build artifacts
+build/
+*.d
+*.dSYM/
+
+# Compiled program files
+*.zvm
+
+# Core dumps
+core
+core.*
+
+# Preprocessor output
+*.i
+*.s
+
+# Static and dynamic libraries
+*.a
+*.so
+*.dylib
+*.lib
+*.dll
+
+# Debug files
+*.gch
+*.pch
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor and IDE files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.sublime-*
+
+# Valgrind output
+vgcore.*
+*.log

@@ -1,0 +1,117 @@
+# -------- Toolchain --------
+CC      ?= cc
+
+# Base warnings + language standard
+BASE_CFLAGS := -std=c11 -Wall -Wextra
+
+# Default build (release)
+CFLAGS  ?= $(BASE_CFLAGS) -O2
+LDFLAGS ?=
+
+# -------- Project layout --------
+SRC_DIR   := src
+EX_DIR    := examples
+BIN_DIR   := bin
+BUILD_DIR := build
+
+TOOLS := svm_asm svm_vm svm_disasm
+
+SRCS := $(SRC_DIR)/svm_asm.c $(SRC_DIR)/svm_vm.c $(SRC_DIR)/svm_disasm.c
+OBJS := $(BUILD_DIR)/svm_asm.o $(BUILD_DIR)/svm_vm.o $(BUILD_DIR)/svm_disasm.o
+DEPS := $(OBJS:.o=.d)
+
+.PHONY: all release debug asan ubsan clean lint run disasm test help
+all: release
+
+help:
+	@echo "Targets:"
+	@echo "  release   Build optimized binaries (default)"
+	@echo "  debug     Build with debug symbols"
+	@echo "  asan      Build with AddressSanitizer"
+	@echo "  ubsan     Build with UndefinedBehaviorSanitizer"
+	@echo "  lint      Run static analysis (clang-tidy if available, else clang --analyze)"
+	@echo "  run       Assemble+run: make run PROG=examples/foo.asm"
+	@echo "  disasm    Disassemble:  make disasm ZVM=program.zvm"
+	@echo "  test      Run golden output tests (./run_test.sh)"
+	@echo "  clean     Remove build/ and bin/"
+
+# -------- Build modes --------
+release: CFLAGS := $(BASE_CFLAGS) -O2
+release: all_tools
+
+debug: CFLAGS := $(BASE_CFLAGS) -O0 -g
+debug: all_tools
+
+asan: CFLAGS := $(BASE_CFLAGS) -O1 -g -fsanitize=address -fno-omit-frame-pointer
+asan: LDFLAGS := -fsanitize=address
+asan: all_tools
+
+ubsan: CFLAGS := $(BASE_CFLAGS) -O1 -g -fsanitize=undefined -fno-omit-frame-pointer
+ubsan: LDFLAGS := -fsanitize=undefined
+ubsan: all_tools
+
+# -------- Main build --------
+all_tools: $(BIN_DIR) $(BUILD_DIR) $(addprefix $(BIN_DIR)/,$(TOOLS))
+
+$(BIN_DIR) $(BUILD_DIR):
+	mkdir -p $@
+
+# Compile each tool (one .c per tool) with dependency generation
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+# Link
+$(BIN_DIR)/svm_asm: $(BUILD_DIR)/svm_asm.o | $(BIN_DIR)
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+$(BIN_DIR)/svm_vm: $(BUILD_DIR)/svm_vm.o | $(BIN_DIR)
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+$(BIN_DIR)/svm_disasm: $(BUILD_DIR)/svm_disasm.o | $(BIN_DIR)
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+-include $(DEPS)
+
+# -------- Lint / Static analysis --------
+# Usage: make lint
+# Prefers clang-tidy if installed; otherwise uses clang static analyzer.
+lint: | $(BUILD_DIR)
+	@set -eu; \
+	if command -v clang-tidy >/dev/null 2>&1; then \
+		echo "Running clang-tidy..."; \
+		clang-tidy $(SRCS) -- -I$(SRC_DIR) $(BASE_CFLAGS) ; \
+	elif command -v clang >/dev/null 2>&1; then \
+		echo "clang-tidy not found; running clang --analyze..."; \
+		cd $(BUILD_DIR) && clang --analyze -I../$(SRC_DIR) $(BASE_CFLAGS) $(addprefix ../,$(SRCS)) ; \
+		echo "Analysis results saved in $(BUILD_DIR)/*.plist"; \
+	else \
+		echo "No clang-tidy or clang found for linting."; \
+		exit 2; \
+	fi
+
+# -------- Convenience --------
+clean:
+	rm -rf $(BIN_DIR) $(BUILD_DIR) *.plist
+
+# Assemble + run a program:
+#   make run PROG=examples/hello.asm
+run: release
+	@if [ -z "$(PROG)" ]; then \
+		echo "Usage: make run PROG=$(EX_DIR)/program.asm"; \
+		exit 2; \
+	fi
+	$(BIN_DIR)/svm_asm "$(PROG)" program.zvm
+	$(BIN_DIR)/svm_vm program.zvm
+
+# Disassemble a .zvm:
+#   make disasm ZVM=program.zvm
+disasm: release
+	@if [ -z "$(ZVM)" ]; then \
+		echo "Usage: make disasm ZVM=path/to/program.zvm"; \
+		exit 2; \
+	fi
+	$(BIN_DIR)/svm_disasm "$(ZVM)"
+
+# Run golden output tests
+test: release
+	./run_test.sh

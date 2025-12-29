@@ -1,0 +1,8 @@
+== test2: asm/vm features ==
+factorial(6) = 720
+fib(10) = 55
+(-42 + 100) / 2 = 29
+gcd(48,18) = 6
+sum(array) = 15
+copied string: Hello from MEMCPY!
+byte_blob bytes (dec): 222 173 190 239
