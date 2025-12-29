@@ -35,5 +35,5 @@ run_one() {
 	fi
 }
 
-run_one test
+run_one test1
 run_one test2
