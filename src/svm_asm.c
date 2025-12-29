@@ -539,6 +539,14 @@ typedef struct {
   int32_t entry_addend;
   int32_t entry_imm;
   int entry_line;
+
+  // Optional linear memory total size (written into ZVM header mem_total_size)
+  int mem_total_is_set;
+  int mem_total_has_symbol;
+  char mem_total_sym[256];
+  int32_t mem_total_addend;
+  int32_t mem_total_imm;
+  int mem_total_line;
 } Asm;
 
 static void asm_init(Asm* A) {
@@ -740,6 +748,27 @@ static void parse_directive(Asm* A, Lex* L) {
       } else {
         A->entry_has_symbol = 0;
         A->entry_imm = e.imm;
+      }
+    }
+    tok_free(&name);
+    expect_eol_or_eof(L);
+    return;
+  }
+
+  if (strcasecmp(name.text, "memtotal") == 0) {
+    Expr e = parse_expr(L);
+    if (A->pass == 1) {
+      if (A->mem_total_is_set) die("duplicate .memtotal");
+      A->mem_total_is_set = 1;
+      A->mem_total_line = name.line;
+      if (e.has_symbol) {
+        A->mem_total_has_symbol = 1;
+        if (strlen(e.sym) >= sizeof(A->mem_total_sym)) die(".memtotal symbol too long");
+        strcpy(A->mem_total_sym, e.sym);
+        A->mem_total_addend = e.addend;
+      } else {
+        A->mem_total_has_symbol = 0;
+        A->mem_total_imm = e.imm;
       }
     }
     tok_free(&name);
@@ -1101,6 +1130,34 @@ int main(int argc, char** argv) {
   free(data1.data);
 
   uint32_t mem_total = (A.data.len < 65536u) ? 65536u : (uint32_t)A.data.len;
+  if (A.mem_total_is_set) {
+    int64_t v = 0;
+    if (A.mem_total_has_symbol) {
+      Sym* s = symtab_find(&A.syms, A.mem_total_sym);
+      if (!s) {
+        fprintf(stderr, "error: line %d: undefined symbol in .memtotal: %s\n", A.mem_total_line, A.mem_total_sym);
+        return 1;
+      }
+      if (s->kind != SYM_CONST) {
+        fprintf(stderr, "error: line %d: .memtotal symbol '%s' must be a .const\n", A.mem_total_line, A.mem_total_sym);
+        return 1;
+      }
+      v = (int64_t)s->value + (int64_t)A.mem_total_addend;
+    } else {
+      v = (int64_t)A.mem_total_imm;
+    }
+
+    if (v <= 0 || v > 0xFFFFFFFFLL) {
+      fprintf(stderr, "error: line %d: .memtotal out of u32 range\n", A.mem_total_line);
+      return 1;
+    }
+    if ((uint64_t)v < (uint64_t)A.data.len) {
+      fprintf(stderr, "error: line %d: .memtotal (%lld) must be >= mem_init_size (%zu)\n",
+              A.mem_total_line, (long long)v, A.data.len);
+      return 1;
+    }
+    mem_total = (uint32_t)v;
+  }
 
   write_zvm(outpath,
             A.code.data, (uint32_t)A.code.len,

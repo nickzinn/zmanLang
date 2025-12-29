@@ -37,3 +37,4 @@ run_one() {
 
 run_one test1
 run_one test2
+run_one test3

@@ -143,6 +143,26 @@ MEMCPY behaves like memmove:
     •    Overlap is allowed
     •    Copy is as-if into a temporary buffer (or direction-aware copy)
 
+5.5 Optional heap allocation (recommended host ABI)
+
+The VM provides linear memory only; higher-level runtimes (like ZManLang) may
+use a simple heap allocator within that linear memory.
+
+Recommended convention (bump allocator):
+    •    The heap starts at the first 4-byte aligned address at or above MemInitSize.
+    •    Allocations are rounded up to 4-byte alignment.
+    •    No free / no garbage collection in v1.
+
+Recommended syscall IDs:
+    •    0: exit(code)             stack: code -> (halts)
+    •    1: print_u32(x)           stack: x ->
+    •    2: print_i32(x)           stack: x ->
+    •    3: putchar(ch)            stack: ch ->
+    •    4: write(ptr,len)         stack: ptr len ->   (writes bytes from linear memory to stdout)
+    •    5: read(ptr,len)          stack: ptr len -> n (reads into linear memory from stdin, returns n)
+    •    6: heap_alloc(nbytes)     stack: nbytes -> ptr (4-byte aligned bump alloc; trap on OOM)
+    •    7: heap_ptr()             stack: -> ptr       (current bump pointer)
+
 ⸻
 
 6. Calling Convention & Frames
@@ -335,6 +355,7 @@ SYSCALL u8 (0x02)
     •    Stack: VM-defined (host ABI)
     •    Effect: invoke host function id
     •    Trap: host may signal trap
+    •    Notes: see §5.5 for the recommended syscall IDs used by this project.
 
 TRAP u16 (0x03)
     •    Size: 3

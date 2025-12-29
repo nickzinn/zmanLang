@@ -19,6 +19,8 @@ Syscalls (SYSCALL u8):
   3: putchar(ch)            stack: ch ->
   4: write(ptr,len)         stack: ptr len ->   (writes bytes from linear memory to stdout)
   5: read(ptr,len)          stack: ptr len -> n (reads into linear memory from stdin, returns n)
+  6: heap_alloc(nbytes)      stack: nbytes -> ptr (4-byte aligned bump alloc; traps on OOM)
+  7: heap_ptr()              stack: -> ptr       (current bump pointer)
 
 TRAP u16:
   Halts with trap code (u16).
@@ -55,6 +57,14 @@ typedef struct {
 
   uint8_t* mem;
   uint32_t mem_size;
+
+  // Size of the initial memory image copied from the ZVM container.
+  // The heap starts at align4(mem_init_size).
+  uint32_t mem_init_size;
+
+  // Bump allocator pointer (byte address into mem).
+  // Grows upward, 4-byte aligned. No free/GC in v1.
+  uint32_t heap_ptr;
 
   uint32_t* stack;
   uint32_t stack_cap; // in words
@@ -400,6 +410,8 @@ static int mem_range_ok(VM* vm, uint32_t addr, uint32_t len) {
 
 static uint32_t mask_shift(uint32_t s) { return s & 31u; }
 
+static uint32_t align4_u32(uint32_t n) { return (n + 3u) & ~3u; }
+
 // ------------------------------ Syscalls ------------------------------
 
 static void do_syscall(VM* vm, uint8_t id) {
@@ -468,6 +480,30 @@ static void do_syscall(VM* vm, uint8_t id) {
       }
       if (!check_stack_push(vm, 1)) return;
       push(vm, (uint32_t)n);
+      return;
+    }
+
+    case 6: { // heap_alloc(nbytes) -> ptr
+      // Allocates from linear memory after the container's mem_init region.
+      // 4-byte aligned bump allocator; traps on OOM.
+      if (!check_stack_pop(vm, 1)) return;
+      uint32_t nbytes = pop(vm);
+      uint32_t size = align4_u32(nbytes);
+      uint32_t base = vm->heap_ptr;
+      // overflow-safe OOM check
+      if (base > vm->mem_size || size > vm->mem_size || base + size < base || base + size > vm->mem_size) {
+        trap(vm, 0xFFFF0200u, "heap out of memory");
+        return;
+      }
+      vm->heap_ptr = base + size;
+      if (!check_stack_push(vm, 1)) return;
+      push(vm, base);
+      return;
+    }
+
+    case 7: { // heap_ptr() -> ptr
+      if (!check_stack_push(vm, 1)) return;
+      push(vm, vm->heap_ptr);
       return;
     }
     default:
@@ -1060,7 +1096,15 @@ static int vm_init_from_container(VM* vm,
   vm->mem = (uint8_t*)calloc(H.mem_total_size ? H.mem_total_size : 1, 1);
   if (!vm->mem) die("out of memory (mem)");
   vm->mem_size = H.mem_total_size;
+  vm->mem_init_size = H.mem_init_size;
   memcpy(vm->mem, container + 28 + H.code_size, H.mem_init_size);
+
+  // Initialize heap just after the static (mem_init) region.
+  vm->heap_ptr = align4_u32(vm->mem_init_size);
+  if (vm->heap_ptr > vm->mem_size) {
+    vm_free(vm);
+    return 0;
+  }
 
   vm->stack = (uint32_t*)calloc(stack_words, sizeof(uint32_t));
   if (!vm->stack) die("out of memory (stack)");

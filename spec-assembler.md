@@ -182,6 +182,22 @@ main:
 
 Optional metadata.
 
+5.8 .memtotal expr
+
+Set the ZVM1 header’s `MemTotalSize` field (total linear memory size at runtime).
+
+This lets programs reserve additional zero-initialized memory beyond what `.data`
+emits (useful for heap-based runtimes).
+
+Syntax:
+    .memtotal constant
+    .memtotal CONST_NAME
+
+Notes:
+    •    `MemTotalSize` must be `>= MemInitSize` (i.e., at least the highest byte written by `.data`).
+    •    Implementations may provide a default when `.memtotal` is omitted (this project defaults to at least 64 KiB).
+    •    In this assembler implementation, the argument must be an immediate or a `.const` symbol (not a label).
+
 ⸻
 
 6) Instruction syntax
