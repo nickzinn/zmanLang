@@ -13,6 +13,9 @@ Recommended layout:
 .module "demo"
 
 .code
+.entry main
+
+main:
   ; code here
 
 .data
@@ -151,7 +154,31 @@ Define a symbol constant (does not allocate space):
 .const SYS_WRITE = 1
 .const STACK_SLOTS = 1024
 
-5.6 .module "name" / .end
+5.6 .entry expr
+
+Set the program entry point (initial IP) written into the ZVM1 header’s `EntryIP` field.
+
+Syntax:
+    .entry label
+    .entry label + constant
+    .entry constant
+
+Notes:
+        •    The entry point is a byte offset into the assembled `.code` section.
+        •    If `expr` uses a label, it must refer to a code label (same kind as used by `JMP`/`CALL`).
+        •    The resolved entry IP must be in range: `0 <= EntryIP < CodeSize`.
+        •    The assembler should reject negative values.
+        •    Only one `.entry` directive is allowed per file.
+
+Example:
+
+.code
+.entry main
+
+main:
+    HALT
+
+5.7 .module "name" / .end
 
 Optional metadata.
 
