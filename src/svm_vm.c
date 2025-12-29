@@ -48,6 +48,11 @@ typedef struct {
   uint8_t* code;
   uint32_t code_size;
 
+  // Instruction-start bitset produced by the verifier. Used to validate dynamic
+  // control-flow targets (RET/CALLI) without per-instruction bounds checks.
+  uint8_t* code_starts;
+  uint32_t code_starts_len; // in bytes
+
   uint8_t* mem;
   uint32_t mem_size;
 
@@ -180,6 +185,164 @@ static uint16_t read_u16_le(const uint8_t* p) {
 
 static int16_t read_s16_le(const uint8_t* p) {
   return (int16_t)read_u16_le(p);
+}
+
+// One-time verifier: ensures instructions are not truncated and that static
+// branch/call targets land on instruction boundaries.
+static int vm_verify_code(const uint8_t* code,
+                          uint32_t code_size,
+                          uint32_t entry_ip,
+                          uint8_t** out_starts,
+                          uint32_t* out_starts_len,
+                          const char** out_err) {
+  if (out_starts) *out_starts = NULL;
+  if (out_starts_len) *out_starts_len = 0;
+  if (out_err) *out_err = NULL;
+  if (!code) {
+    if (out_err) *out_err = "null code";
+    return 0;
+  }
+  if (code_size == 0) {
+    if (out_err) *out_err = "empty code";
+    return 0;
+  }
+  if (entry_ip >= code_size) {
+    if (out_err) *out_err = "entry_ip out of range";
+    return 0;
+  }
+
+  uint32_t bits_len = (code_size + 7u) / 8u;
+  uint8_t* starts = (uint8_t*)calloc(bits_len ? (size_t)bits_len : 1u, 1);
+  if (!starts) {
+    if (out_err) *out_err = "out of memory (verify starts)";
+    return 0;
+  }
+
+  // Worst-case allocation: very small code, or degenerate input.
+  uint32_t* targets = (uint32_t*)xmalloc((size_t)code_size * sizeof(uint32_t));
+  uint32_t tcount = 0;
+
+#define SET_START(_ip) do { starts[(_ip) >> 3] = (uint8_t)(starts[(_ip) >> 3] | (uint8_t)(1u << ((_ip) & 7u))); } while (0)
+#define IS_START(_ip)  ((starts[(_ip) >> 3] >> ((_ip) & 7u)) & 1u)
+
+  const char* err = NULL;
+  uint32_t ip = 0;
+  while (ip < code_size) {
+    SET_START(ip);
+    uint8_t op = code[ip++];
+    uint32_t imm = 0;
+
+    switch (op) {
+      case 0x00: /* NOP */ break;
+      case 0x01: /* HALT */ break;
+      case 0x02: /* SYSCALL u8 */ imm = 1; break;
+      case 0x03: /* TRAP u16 */ imm = 2; break;
+      case 0x04: /* JMP addr32 */ imm = 4; break;
+      case 0x05: /* JZ addr32 */ imm = 4; break;
+      case 0x06: /* JNZ addr32 */ imm = 4; break;
+      case 0x07: /* PUSHI u32 */ imm = 4; break;
+      case 0x08: /* POP */ break;
+      case 0x09: /* DUP */ break;
+      case 0x0A: /* DUP2 */ break;
+      case 0x0B: /* SWAP */ break;
+      case 0x0C: /* ROT */ break;
+      case 0x0D: /* OVER */ break;
+      case 0x0E: /* CALL addr32 */ imm = 4; break;
+      case 0x0F: /* RET u8 */ imm = 1; break;
+      case 0x10: /* ENTER u16 */ imm = 2; break;
+      case 0x11: /* LEAVE */ break;
+      case 0x12: /* LDFP s16 */ imm = 2; break;
+      case 0x13: /* STFP s16 */ imm = 2; break;
+      case 0x14: /* LOAD32 */ break;
+      case 0x15: /* STORE32 */ break;
+      case 0x16: /* LOAD8U */ break;
+      case 0x17: /* STORE8 */ break;
+      case 0x18: /* MEMCPY */ break;
+      case 0x19: /* ADD */ break;
+      case 0x1A: /* SUB */ break;
+      case 0x1B: /* MUL */ break;
+      case 0x1C: /* DIVS */ break;
+      case 0x1D: /* NEG */ break;
+      case 0x1E: /* AND */ break;
+      case 0x1F: /* OR */ break;
+      case 0x20: /* XOR */ break;
+      case 0x21: /* SHL */ break;
+      case 0x22: /* SHR */ break;
+      case 0x23: /* EQ */ break;
+      case 0x24: /* LT */ break;
+      case 0x25: /* GT */ break;
+      case 0x26: /* LE */ break;
+      case 0x27: /* GE */ break;
+      case 0x28: /* ADDI s16 */ imm = 2; break;
+      case 0x29: /* SUBI s16 */ imm = 2; break;
+      case 0x2A: /* INC */ break;
+      case 0x2B: /* DEC */ break;
+      case 0x2C: /* MODS */ break;
+      case 0x2D: /* NOT */ break;
+      case 0x2E: /* CALLI */ break;
+      case 0x2F: /* TAILCALL addr32 */ imm = 4; break;
+      case 0x30: /* LOAD_OFF s16 */ imm = 2; break;
+      case 0x31: /* STORE_OFF s16 */ imm = 2; break;
+      default:
+        err = "unknown opcode";
+        goto fail;
+    }
+
+    if (ip + imm > code_size) {
+      err = "truncated instruction";
+      goto fail;
+    }
+
+    // Record static branch/call targets for validation against instruction boundaries.
+    if (imm == 4u) {
+      if (op == 0x04 || op == 0x05 || op == 0x06 || op == 0x0E || op == 0x2F) {
+        uint32_t target = read_u32_le(code + ip);
+        targets[tcount++] = target;
+      }
+    }
+
+    ip += imm;
+  }
+
+  if (!IS_START(entry_ip)) {
+    err = "entry_ip not on instruction boundary";
+    goto fail;
+  }
+
+  for (uint32_t i = 0; i < tcount; i++) {
+    uint32_t t = targets[i];
+    if (t >= code_size) {
+      err = "branch target out of range";
+      goto fail;
+    }
+    if (!IS_START(t)) {
+      err = "branch target not on instruction boundary";
+      goto fail;
+    }
+  }
+
+  free(targets);
+  if (out_starts) *out_starts = starts;
+  if (out_starts_len) *out_starts_len = bits_len;
+  return 1;
+
+fail:
+  if (out_err) *out_err = err ? err : "verification failed";
+  free(targets);
+  free(starts);
+  return 0;
+
+#undef IS_START
+#undef SET_START
+}
+
+static inline int code_is_start(const VM* vm, uint32_t ip) {
+  if (!vm->code_starts) return 0;
+  if (ip >= vm->code_size) return 0;
+  uint32_t byte = ip >> 3;
+  uint32_t bit = ip & 7u;
+  if (byte >= vm->code_starts_len) return 0;
+  return ((vm->code_starts[byte] >> bit) & 1u) != 0u;
 }
 
 static void write_u32_mem_le(uint8_t* mem, uint32_t addr, uint32_t v) {
@@ -315,7 +478,7 @@ static void do_syscall(VM* vm, uint8_t id) {
 
 // ------------------------------ Dispatch ------------------------------
 
-static void step(VM* vm) {
+static inline __attribute__((always_inline)) void step(VM* vm) {
   // Cache hot fields in locals (helps WASM and native).
   uint8_t* code = vm->code;
   uint32_t code_size = vm->code_size;
@@ -328,7 +491,6 @@ static void step(VM* vm) {
   uint32_t fp = vm->fp;
 
 #define TRAP(_code, _msg) do { trap(vm, (_code), (_msg)); goto end; } while (0)
-#define CHECK_IP(_need) do { if (ip + (uint32_t)(_need) > code_size) TRAP(0xFFFF0001u, "IP out of range"); } while (0)
 #define CHECK_PUSH(_n) do { if (sp + (uint32_t)(_n) > stack_cap) TRAP(0xFFFF0002u, "stack overflow"); } while (0)
 #define CHECK_POP(_n) do { if (sp < (uint32_t)(_n)) TRAP(0xFFFF0003u, "stack underflow"); } while (0)
 #define PUSH(_v) do { stack[sp++] = (_v); } while (0)
@@ -344,7 +506,9 @@ static void step(VM* vm) {
 #define MEM_ADDR_OK(_addr) ((_addr) < mem_size)
 #define MEM_ADDR32_OK(_addr) (((_addr) + 4u) <= mem_size)
 
-  CHECK_IP(1);
+  // Bytecode is verified at load time, but dynamic control-flow (RET/CALLI)
+  // can still attempt invalid targets. Keep a single guard for safety.
+  if (ip >= code_size) TRAP(0xFFFF0001u, "IP out of range");
   uint8_t op = code[ip++];
 
   switch (op) {
@@ -361,7 +525,6 @@ static void step(VM* vm) {
 
     // 0x02 SYSCALL u8
     case 0x02: {
-      CHECK_IP(1);
       uint8_t id = code[ip++];
       // Sync locals before calling helper.
       vm->ip = ip;
@@ -384,7 +547,6 @@ static void step(VM* vm) {
 
     // 0x03 TRAP u16
     case 0x03: {
-      CHECK_IP(2);
       uint16_t tc = read_u16_le(code + ip);
       ip += 2;
       trap(vm, (uint32_t)tc, "TRAP");
@@ -393,44 +555,37 @@ static void step(VM* vm) {
 
     // 0x04 JMP addr32
     case 0x04: {
-      CHECK_IP(4);
       uint32_t a = read_u32_le(code + ip);
       ip = a;
-      if (ip >= code_size) TRAP(0xFFFF0004u, "JMP to invalid address");
       break;
     }
 
     // 0x05 JZ addr32
     case 0x05: {
-      CHECK_IP(4);
       uint32_t a = read_u32_le(code + ip);
       ip += 4;
       CHECK_POP(1);
       uint32_t c = POP();
       if (c == 0) {
         ip = a;
-        if (ip >= code_size) TRAP(0xFFFF0005u, "JZ to invalid address");
       }
       break;
     }
 
     // 0x06 JNZ addr32
     case 0x06: {
-      CHECK_IP(4);
       uint32_t a = read_u32_le(code + ip);
       ip += 4;
       CHECK_POP(1);
       uint32_t c = POP();
       if (c != 0) {
         ip = a;
-        if (ip >= code_size) TRAP(0xFFFF0006u, "JNZ to invalid address");
       }
       break;
     }
 
     // 0x07 PUSHI u32
     case 0x07: {
-      CHECK_IP(4);
       uint32_t imm = read_u32_le(code + ip);
       ip += 4;
       CHECK_PUSH(1);
@@ -502,10 +657,8 @@ static void step(VM* vm) {
 
     // 0x0E CALL addr32
     case 0x0E: {
-      CHECK_IP(4);
       uint32_t target = read_u32_le(code + ip);
       ip += 4;
-      if (target >= code_size) TRAP(0xFFFF000Eu, "CALL to invalid address");
       CHECK_PUSH(2);
       uint32_t ret_ip = ip;
       PUSH(ret_ip);
@@ -519,7 +672,7 @@ static void step(VM* vm) {
     case 0x2E: {
       CHECK_POP(1);
       uint32_t target = POP();
-      if (target >= code_size) TRAP(0xFFFF002Eu, "CALLI to invalid address");
+      if (target >= code_size || !code_is_start(vm, target)) TRAP(0xFFFF002Eu, "CALLI to invalid address");
       CHECK_PUSH(2);
       uint32_t ret_ip = ip;
       PUSH(ret_ip);
@@ -531,7 +684,6 @@ static void step(VM* vm) {
 
     // 0x10 ENTER u16
     case 0x10: {
-      CHECK_IP(2);
       uint16_t nlocals = read_u16_le(code + ip);
       ip += 2;
       CHECK_PUSH(nlocals);
@@ -547,7 +699,6 @@ static void step(VM* vm) {
 
     // 0x12 LDFP s16
     case 0x12: {
-      CHECK_IP(2);
       int16_t off = read_s16_le(code + ip);
       ip += 2;
       int64_t idx = (int64_t)fp + (int64_t)off;
@@ -559,7 +710,6 @@ static void step(VM* vm) {
 
     // 0x13 STFP s16
     case 0x13: {
-      CHECK_IP(2);
       int16_t off = read_s16_le(code + ip);
       ip += 2;
       CHECK_POP(1);
@@ -572,7 +722,6 @@ static void step(VM* vm) {
 
     // 0x0F RET u8
     case 0x0F: {
-      CHECK_IP(1);
       uint8_t argc = code[ip++];
       CHECK_POP(1);
       uint32_t rv = POP();
@@ -591,17 +740,15 @@ static void step(VM* vm) {
       PUSH(rv);
 
       fp = old_fp;
+      if (ret_ip >= code_size || !code_is_start(vm, ret_ip)) TRAP(0xFFFF000Fu, "RET to invalid ip");
       ip = ret_ip;
-      if (ip > code_size) TRAP(0xFFFF000Fu, "RET to invalid ip");
       break;
     }
 
     // 0x2F TAILCALL addr32
     case 0x2F: {
-      CHECK_IP(4);
       uint32_t target = read_u32_le(code + ip);
       ip = target;
-      if (ip >= code_size) TRAP(0xFFFF002Fu, "TAILCALL to invalid address");
       break;
     }
 
@@ -782,7 +929,6 @@ static void step(VM* vm) {
 
     // 0x28 ADDI s16
     case 0x28: {
-      CHECK_IP(2);
       int16_t imm = read_s16_le(code + ip);
       ip += 2;
       CHECK_POP(1);
@@ -793,7 +939,6 @@ static void step(VM* vm) {
 
     // 0x29 SUBI s16
     case 0x29: {
-      CHECK_IP(2);
       int16_t imm = read_s16_le(code + ip);
       ip += 2;
       CHECK_POP(1);
@@ -832,7 +977,6 @@ static void step(VM* vm) {
 
     // 0x30 LOAD_OFF s16 : base -> load32(base+imm)
     case 0x30: {
-      CHECK_IP(2);
       int16_t imm = read_s16_le(code + ip);
       ip += 2;
       CHECK_POP(1);
@@ -846,7 +990,6 @@ static void step(VM* vm) {
 
     // 0x31 STORE_OFF s16 : base value -> store32(base+imm, value)
     case 0x31: {
-      CHECK_IP(2);
       int16_t imm = read_s16_le(code + ip);
       ip += 2;
       CHECK_POP(2);
@@ -874,7 +1017,6 @@ end:
 #undef PUSH
 #undef CHECK_POP
 #undef CHECK_PUSH
-#undef CHECK_IP
 #undef TRAP
 }
 
@@ -883,6 +1025,7 @@ end:
 static void vm_free(VM* vm) {
   if (!vm) return;
   if (vm->owns_container) free(vm->container);
+  free(vm->code_starts);
   free(vm->mem);
   free(vm->stack);
   free(vm->out);
@@ -926,6 +1069,13 @@ static int vm_init_from_container(VM* vm,
   vm->ip = H.entry_ip;
   vm->sp = 0;
   vm->fp = 0;
+
+  const char* verr = NULL;
+  if (!vm_verify_code(vm->code, vm->code_size, vm->ip, &vm->code_starts, &vm->code_starts_len, &verr)) {
+    (void)verr;
+    vm_free(vm);
+    return 0;
+  }
 
 #if defined(__EMSCRIPTEN__)
   vm->stream_stdio = 0;
