@@ -35,9 +35,33 @@ emcc ../../src/svm_vm.c \
   -s EXPORTED_RUNTIME_METHODS='["HEAPU8"]' \
   -o svm_vm.js
 
+# Build the assembler.
+emcc ../../src/svm_asm.c \
+  -O3 \
+  -s WASM=1 \
+  -s ENVIRONMENT=web \
+  -s MODULARIZE=1 \
+  -s EXPORT_NAME='createSvmAsm' \
+  -s ALLOW_MEMORY_GROWTH=1 \
+  -s EXPORTED_FUNCTIONS='[
+    "_svm_asm_assemble_from_buffer",
+    "_svm_asm_output_ptr",
+    "_svm_asm_output_len",
+    "_svm_asm_output_clear",
+    "_svm_asm_error_ptr",
+    "_svm_asm_error_len",
+    "_svm_asm_error_clear",
+    "_malloc",
+    "_free"
+  ]' \
+  -s EXPORTED_RUNTIME_METHODS='["HEAPU8"]' \
+  -o svm_asm.js
+
 # Provide a default program for the harness.
 cp -f ../../program.zvm ./program.zvm
+cp -f ../../examples/test1.asm ./program.asm
 
-echo "built: examples/web/svm_vm.js (+ wasm) and examples/web/program.zvm"
+echo "built: examples/web/svm_vm.js (+ wasm), examples/web/svm_asm.js (+ wasm)"
+echo "copied: examples/web/program.zvm and examples/web/program.asm"
 echo "serve:  cd examples/web && python3 -m http.server 8000"
 echo "open:   http://localhost:8000"

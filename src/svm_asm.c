@@ -28,9 +28,11 @@ Notes / scope:
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <string.h>
 #include <strings.h>
 #include <ctype.h>
+#include <setjmp.h>
 
 #if defined(_MSC_VER)
 #define strcasecmp _stricmp
@@ -42,13 +44,59 @@ Notes / scope:
 // Updated by the lexer as it scans the input.
 static int g_cur_line = 0;
 
+// When assembling under a host (e.g. WebAssembly), we want a non-fatal API.
+// The CLI path keeps printing to stderr + exit(1) as before.
+static int g_trap_errors = 0;
+static jmp_buf g_trap_jmp;
+
+static uint8_t* g_svm_asm_err = NULL;
+static uint32_t g_svm_asm_err_len = 0;
+
+static void svm_asm_error_clear_internal(void) {
+  free(g_svm_asm_err);
+  g_svm_asm_err = NULL;
+  g_svm_asm_err_len = 0;
+}
+
+static void svm_asm_error_setf(const char* fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  char tmp[2048];
+  int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+  va_end(ap);
+
+  if (n < 0) {
+    svm_asm_error_clear_internal();
+    return;
+  }
+
+  if ((size_t)n >= sizeof(tmp)) n = (int)sizeof(tmp) - 1;
+
+  svm_asm_error_clear_internal();
+  g_svm_asm_err = (uint8_t*)malloc((size_t)n + 1);
+  if (!g_svm_asm_err) return;
+  memcpy(g_svm_asm_err, tmp, (size_t)n);
+  g_svm_asm_err[n] = 0;
+  g_svm_asm_err_len = (uint32_t)n;
+}
+
 static void die(const char* msg) {
+  if (g_trap_errors) {
+    if (g_cur_line > 0) svm_asm_error_setf("error: line %d: %s", g_cur_line, msg);
+    else svm_asm_error_setf("error: %s", msg);
+    longjmp(g_trap_jmp, 1);
+  }
   if (g_cur_line > 0) fprintf(stderr, "error: line %d: %s\n", g_cur_line, msg);
   else fprintf(stderr, "error: %s\n", msg);
   exit(1);
 }
 
 static void die2(const char* msg, const char* detail) {
+  if (g_trap_errors) {
+    if (g_cur_line > 0) svm_asm_error_setf("error: line %d: %s: %s", g_cur_line, msg, detail);
+    else svm_asm_error_setf("error: %s: %s", msg, detail);
+    longjmp(g_trap_jmp, 1);
+  }
   if (g_cur_line > 0) fprintf(stderr, "error: line %d: %s: %s\n", g_cur_line, msg, detail);
   else fprintf(stderr, "error: %s: %s\n", msg, detail);
   exit(1);
@@ -96,6 +144,13 @@ static void buf_reserve(Buf* b, size_t add) {
 static void buf_write_u8(Buf* b, uint8_t v) {
   buf_reserve(b, 1);
   b->data[b->len++] = v;
+}
+
+static void buf_write_bytes(Buf* b, const void* src, size_t n) {
+  if (n == 0) return;
+  buf_reserve(b, n);
+  memcpy(b->data + b->len, src, n);
+  b->len += n;
 }
 
 static void buf_write_u16_le(Buf* b, uint16_t v) {
@@ -674,20 +729,26 @@ static void expect_eol_or_eof(Lex* L) {
 
 static void require_range_s16(int32_t v, int line) {
   if (v < -32768 || v > 32767) {
-    fprintf(stderr, "error: line %d: s16 out of range: %d\n", line, v);
-    exit(1);
+    g_cur_line = line;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%d", v);
+    die2("s16 out of range", buf);
   }
 }
 static void require_range_u16(int32_t v, int line) {
   if (v < 0 || v > 65535) {
-    fprintf(stderr, "error: line %d: u16 out of range: %d\n", line, v);
-    exit(1);
+    g_cur_line = line;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%d", v);
+    die2("u16 out of range", buf);
   }
 }
 static void require_range_u8(int32_t v, int line) {
   if (v < 0 || v > 255) {
-    fprintf(stderr, "error: line %d: u8 out of range: %d\n", line, v);
-    exit(1);
+    g_cur_line = line;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%d", v);
+    die2("u8 out of range", buf);
   }
 }
 
@@ -697,13 +758,13 @@ static void require_range_u8(int32_t v, int line) {
 static uint32_t resolve_symbol_value(Asm* A, FixKind kind, const char* sym, int line) {
   Sym* s = symtab_find(&A->syms, sym);
   if (!s) {
-    fprintf(stderr, "error: line %d: undefined symbol: %s\n", line, sym);
-    exit(1);
+    g_cur_line = line;
+    die2("undefined symbol", sym);
   }
   if (kind == FX_ADDR32_CODE) {
     if (s->kind != SYM_CODE) {
-      fprintf(stderr, "error: line %d: symbol '%s' is not a code label\n", line, sym);
-      exit(1);
+      g_cur_line = line;
+      die2("symbol is not a code label", sym);
     }
     return s->value;
   }
@@ -717,8 +778,8 @@ static void apply_fixups(Asm* A) {
     uint32_t base = resolve_symbol_value(A, fx->kind, fx->sym, fx->line);
     int64_t val64 = (int64_t)base + (int64_t)fx->addend;
     if (val64 < 0 || val64 > 0xFFFFFFFFLL) {
-      fprintf(stderr, "error: line %d: fixup value out of u32 range for %s\n", fx->line, fx->sym);
-      exit(1);
+      g_cur_line = fx->line;
+      die2("fixup value out of u32 range for", fx->sym);
     }
     uint32_t val = (uint32_t)val64;
 
@@ -1059,6 +1120,204 @@ static void write_zvm(const char* path,
   if (mem_len  && fwrite(mem,  1, mem_len,  f) != mem_len)  die2("write failed", path);
 
   fclose(f);
+}
+
+static void write_zvm_to_buf(Buf* out,
+                             const uint8_t* code, uint32_t code_len,
+                             const uint8_t* mem,  uint32_t mem_len,
+                             uint32_t mem_total,
+                             uint32_t entry_ip) {
+  if (!out) die("internal: null out buffer");
+  out->len = 0;
+
+  const uint8_t magic[4] = { 'Z','V','M','1' };
+  uint16_t version = 1;
+  uint16_t flags = 0;
+  uint32_t reserved = 0;
+
+  buf_write_bytes(out, magic, 4);
+
+  uint8_t hdr[24];
+  hdr[0] = (uint8_t)(version & 0xFF);
+  hdr[1] = (uint8_t)((version >> 8) & 0xFF);
+  hdr[2] = (uint8_t)(flags & 0xFF);
+  hdr[3] = (uint8_t)((flags >> 8) & 0xFF);
+
+  uint32_t fields[5] = { code_len, mem_len, mem_total, entry_ip, reserved };
+  for (int i = 0; i < 5; i++) {
+    uint32_t v = fields[i];
+    hdr[4 + i*4 + 0] = (uint8_t)(v & 0xFF);
+    hdr[4 + i*4 + 1] = (uint8_t)((v >> 8) & 0xFF);
+    hdr[4 + i*4 + 2] = (uint8_t)((v >> 16) & 0xFF);
+    hdr[4 + i*4 + 3] = (uint8_t)((v >> 24) & 0xFF);
+  }
+
+  buf_write_bytes(out, hdr, 24);
+  buf_write_bytes(out, code, code_len);
+  buf_write_bytes(out, mem, mem_len);
+}
+
+// ---------------------------- In-memory assembly API ----------------------------
+
+static uint8_t* g_svm_asm_out = NULL;
+static uint32_t g_svm_asm_out_len = 0;
+
+static void svm_asm_output_clear_internal(void) {
+  free(g_svm_asm_out);
+  g_svm_asm_out = NULL;
+  g_svm_asm_out_len = 0;
+}
+
+static void asm_free_all(Asm* A) {
+  if (!A) return;
+
+  free(A->code.data);
+  free(A->data.data);
+
+  for (size_t i = 0; i < A->syms.len; i++) free(A->syms.items[i].name);
+  free(A->syms.items);
+
+  for (size_t i = 0; i < A->fixups.len; i++) free(A->fixups.items[i].sym);
+  free(A->fixups.items);
+
+  memset(A, 0, sizeof(*A));
+}
+
+static void assemble_text_to_container_buf(const char* text, Buf* out_container) {
+  Asm A;
+  asm_init(&A);
+
+  // Pass 1
+  A.pass = 1;
+  parse_file(&A, text);
+
+  // Pass 2 (rebuild blobs)
+  Buf code1 = A.code, data1 = A.data;
+  A.code.data = NULL; A.code.len = A.code.cap = 0;
+  A.data.data = NULL; A.data.len = A.data.cap = 0;
+
+  A.sec = SEC_CODE;
+  A.pass = 2;
+  parse_file(&A, text);
+
+  apply_fixups(&A);
+
+  uint32_t entry_ip = 0u;
+  if (A.entry_is_set) {
+    if (A.entry_has_symbol) {
+      uint32_t base = resolve_symbol_value(&A, FX_ADDR32_CODE, A.entry_sym, A.entry_line);
+      int64_t v = (int64_t)base + (int64_t)A.entry_addend;
+      if (v < 0 || v > 0xFFFFFFFFLL) {
+        g_cur_line = A.entry_line;
+        die(".entry out of u32 range");
+      }
+      entry_ip = (uint32_t)v;
+    } else {
+      if (A.entry_imm < 0) {
+        g_cur_line = A.entry_line;
+        die(".entry cannot be negative");
+      }
+      entry_ip = (uint32_t)A.entry_imm;
+    }
+    if (entry_ip > (uint32_t)A.code.len) {
+      g_cur_line = A.entry_line;
+      die(".entry out of range");
+    }
+  }
+
+  free(code1.data);
+  free(data1.data);
+
+  uint32_t mem_total = (A.data.len < 65536u) ? 65536u : (uint32_t)A.data.len;
+  if (A.mem_total_is_set) {
+    int64_t v = 0;
+    if (A.mem_total_has_symbol) {
+      Sym* s = symtab_find(&A.syms, A.mem_total_sym);
+      if (!s) {
+        g_cur_line = A.mem_total_line;
+        die2("undefined symbol in .memtotal", A.mem_total_sym);
+      }
+      if (s->kind != SYM_CONST) {
+        g_cur_line = A.mem_total_line;
+        die2(".memtotal symbol must be a .const", A.mem_total_sym);
+      }
+      v = (int64_t)s->value + (int64_t)A.mem_total_addend;
+    } else {
+      v = (int64_t)A.mem_total_imm;
+    }
+
+    if (v <= 0 || v > 0xFFFFFFFFLL) {
+      g_cur_line = A.mem_total_line;
+      die(".memtotal out of u32 range");
+    }
+    if ((uint64_t)v < (uint64_t)A.data.len) {
+      g_cur_line = A.mem_total_line;
+      die(".memtotal must be >= mem_init_size");
+    }
+    mem_total = (uint32_t)v;
+  }
+
+  write_zvm_to_buf(out_container,
+                   A.code.data, (uint32_t)A.code.len,
+                   A.data.data, (uint32_t)A.data.len,
+                   mem_total,
+                   entry_ip);
+
+  asm_free_all(&A);
+}
+
+// Assemble from a source buffer in memory.
+// Returns 1 on success, 0 on error. On success, use svm_asm_output_ptr/len.
+int svm_asm_assemble_from_buffer(const uint8_t* src, uint32_t src_len) {
+  svm_asm_output_clear_internal();
+  svm_asm_error_clear_internal();
+  g_cur_line = 0;
+
+  g_trap_errors = 1;
+  if (setjmp(g_trap_jmp) != 0) {
+    // error already captured
+    g_trap_errors = 0;
+    return 0;
+  }
+
+  char* text = (char*)xmalloc((size_t)src_len + 1);
+  memcpy(text, src, (size_t)src_len);
+  text[src_len] = 0;
+
+  Buf out = {0};
+  assemble_text_to_container_buf(text, &out);
+
+  free(text);
+
+  g_svm_asm_out = out.data;
+  g_svm_asm_out_len = (uint32_t)out.len;
+
+  g_trap_errors = 0;
+  return 1;
+}
+
+uint32_t svm_asm_output_ptr(void) {
+  return (uint32_t)(uintptr_t)g_svm_asm_out;
+}
+
+uint32_t svm_asm_output_len(void) {
+  return g_svm_asm_out_len;
+}
+
+void svm_asm_output_clear(void) {
+  svm_asm_output_clear_internal();
+}
+
+uint32_t svm_asm_error_ptr(void) {
+  return (uint32_t)(uintptr_t)g_svm_asm_err;
+}
+
+uint32_t svm_asm_error_len(void) {
+  return g_svm_asm_err_len;
+}
+
+void svm_asm_error_clear(void) {
+  svm_asm_error_clear_internal();
 }
 
 // ---------------------------- Main ----------------------------

@@ -20,7 +20,7 @@ SRCS := $(SRC_DIR)/svm_asm.c $(SRC_DIR)/svm_vm.c $(SRC_DIR)/svm_disasm.c
 OBJS := $(BUILD_DIR)/svm_asm.o $(BUILD_DIR)/svm_vm.o $(BUILD_DIR)/svm_disasm.o
 DEPS := $(OBJS:.o=.d)
 
-.PHONY: all release debug asan ubsan clean lint run disasm test help
+.PHONY: all release debug asan ubsan clean lint run disasm test web help
 all: release
 
 help:
@@ -115,3 +115,7 @@ disasm: release
 # Run golden output tests
 test: release
 	./run_test.sh
+
+# Build browser (Emscripten) bundles
+web:
+	cd $(EX_DIR)/web && ./build_web.sh
