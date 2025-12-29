@@ -39,6 +39,12 @@ Notes:
 #include <errno.h>
 
 typedef struct {
+  // Optional pointer to the ZVM container backing vm->code.
+  // If owns_container=1, VM cleanup will free it.
+  uint8_t* container;
+  size_t container_len;
+  int owns_container;
+
   uint8_t* code;
   uint32_t code_size;
 
@@ -55,6 +61,15 @@ typedef struct {
   int halted;
   uint32_t trap_code;
   const char* trap_msg;
+
+  // Output capture (useful for browser/WASM builds).
+  uint8_t* out;
+  size_t out_len;
+  size_t out_cap;
+
+  // Host I/O behavior
+  int stream_stdio;   // if true, use stdio for syscalls 1-5
+  int capture_output; // if true, capture writes/prints into out
 } VM;
 
 // ------------------------------ Helpers ------------------------------
@@ -62,6 +77,18 @@ typedef struct {
 static void die(const char* msg) {
   fprintf(stderr, "error: %s\n", msg);
   exit(1);
+}
+
+static void* xmalloc(size_t n) {
+  void* p = malloc(n ? n : 1);
+  if (!p) die("out of memory");
+  return p;
+}
+
+static void* xrealloc(void* p, size_t n) {
+  void* q = realloc(p, n ? n : 1);
+  if (!q) die("out of memory");
+  return q;
 }
 
 static uint8_t* read_file(const char* path, size_t* out_len) {
@@ -74,13 +101,36 @@ static uint8_t* read_file(const char* path, size_t* out_len) {
   long n = ftell(f);
   if (n < 0) die("ftell failed");
   fseek(f, 0, SEEK_SET);
-  uint8_t* buf = (uint8_t*)malloc((size_t)n ? (size_t)n : 1);
-  if (!buf) die("out of memory");
+  uint8_t* buf = (uint8_t*)xmalloc((size_t)n);
   size_t rd = fread(buf, 1, (size_t)n, f);
   fclose(f);
   if (rd != (size_t)n) die("file read failed");
   *out_len = (size_t)n;
   return buf;
+}
+
+static void out_reserve(VM* vm, size_t add) {
+  size_t need = vm->out_len + add;
+  if (need <= vm->out_cap) return;
+  size_t ncap = vm->out_cap ? vm->out_cap : 256;
+  while (ncap < need) ncap *= 2;
+  vm->out = (uint8_t*)xrealloc(vm->out, ncap);
+  vm->out_cap = ncap;
+}
+
+static void out_write(VM* vm, const void* data, size_t len) {
+  if (!vm->capture_output || len == 0) return;
+  out_reserve(vm, len);
+  memcpy(vm->out + vm->out_len, data, len);
+  vm->out_len += len;
+}
+
+static void out_write_u8(VM* vm, uint8_t b) {
+  out_write(vm, &b, 1);
+}
+
+static void out_clear(VM* vm) {
+  vm->out_len = 0;
 }
 
 // ------------------------------ ZVM Container ------------------------------
@@ -219,22 +269,31 @@ static void do_syscall(VM* vm, uint8_t id) {
     case 1: { // print_u32(x)
       if (!check_stack_pop(vm, 1)) return;
       uint32_t x = pop(vm);
-      printf("%u", x);
-      fflush(stdout);
+      char buf[32];
+      int n = snprintf(buf, sizeof(buf), "%u", x);
+      if (n > 0) {
+        if (vm->stream_stdio) { fwrite(buf, 1, (size_t)n, stdout); fflush(stdout); }
+        out_write(vm, buf, (size_t)n);
+      }
       return;
     }
     case 2: { // print_i32(x)
       if (!check_stack_pop(vm, 1)) return;
       int32_t x = (int32_t)pop(vm);
-      printf("%d", x);
-      fflush(stdout);
+      char buf[32];
+      int n = snprintf(buf, sizeof(buf), "%d", x);
+      if (n > 0) {
+        if (vm->stream_stdio) { fwrite(buf, 1, (size_t)n, stdout); fflush(stdout); }
+        out_write(vm, buf, (size_t)n);
+      }
       return;
     }
     case 3: { // putchar(ch)
       if (!check_stack_pop(vm, 1)) return;
       uint32_t ch = pop(vm);
-      fputc((int)(ch & 0xFFu), stdout);
-      fflush(stdout);
+      uint8_t b = (uint8_t)(ch & 0xFFu);
+      if (vm->stream_stdio) { fputc((int)b, stdout); fflush(stdout); }
+      out_write_u8(vm, b);
       return;
     }
     case 4: { // write(ptr,len)
@@ -242,8 +301,10 @@ static void do_syscall(VM* vm, uint8_t id) {
       uint32_t len = pop(vm);
       uint32_t ptr = pop(vm);
       if (!mem_range_ok(vm, ptr, len)) { trap(vm, 0xFFFF0100u, "syscall write OOB"); return; }
-      if (len) fwrite(vm->mem + ptr, 1, len, stdout);
-      fflush(stdout);
+      if (len) {
+        if (vm->stream_stdio) { fwrite(vm->mem + ptr, 1, len, stdout); fflush(stdout); }
+        out_write(vm, vm->mem + ptr, (size_t)len);
+      }
       return;
     }
     case 5: { // read(ptr,len) -> n
@@ -252,7 +313,13 @@ static void do_syscall(VM* vm, uint8_t id) {
       uint32_t ptr = pop(vm);
       if (!mem_range_ok(vm, ptr, len)) { trap(vm, 0xFFFF0101u, "syscall read OOB"); return; }
       size_t n = 0;
-      if (len) n = fread(vm->mem + ptr, 1, len, stdin);
+      if (vm->stream_stdio) {
+        if (len) n = fread(vm->mem + ptr, 1, len, stdin);
+      } else {
+        // Browser/WASM builds can provide input via a custom host layer.
+        // Default: return 0 bytes read.
+        n = 0;
+      }
       if (!check_stack_push(vm, 1)) return;
       push(vm, (uint32_t)n);
       return;
@@ -767,6 +834,126 @@ static void step(VM* vm) {
   }
 }
 
+// ------------------------------ VM API (buffer-based) ------------------------------
+
+static void vm_free(VM* vm) {
+  if (!vm) return;
+  if (vm->owns_container) free(vm->container);
+  free(vm->mem);
+  free(vm->stack);
+  free(vm->out);
+  memset(vm, 0, sizeof(*vm));
+}
+
+static int vm_init_from_container(VM* vm,
+                                  uint8_t* container,
+                                  size_t container_len,
+                                  int owns_container,
+                                  uint32_t stack_words) {
+  if (!vm) return 0;
+  memset(vm, 0, sizeof(*vm));
+
+  ZvmHeader H;
+  if (!read_zvm_header(container, container_len, &H)) return 0;
+
+  const size_t need = 28ull + (size_t)H.code_size + (size_t)H.mem_init_size;
+  if (need > container_len) return 0;
+  if (H.mem_total_size < H.mem_init_size) return 0;
+  if (H.entry_ip > H.code_size) return 0;
+  if (stack_words == 0) return 0;
+
+  vm->container = container;
+  vm->container_len = container_len;
+  vm->owns_container = owns_container;
+
+  // Avoid copying code: point into the container blob.
+  vm->code = container + 28;
+  vm->code_size = H.code_size;
+
+  vm->mem = (uint8_t*)calloc(H.mem_total_size ? H.mem_total_size : 1, 1);
+  if (!vm->mem) die("out of memory (mem)");
+  vm->mem_size = H.mem_total_size;
+  memcpy(vm->mem, container + 28 + H.code_size, H.mem_init_size);
+
+  vm->stack = (uint32_t*)calloc(stack_words, sizeof(uint32_t));
+  if (!vm->stack) die("out of memory (stack)");
+  vm->stack_cap = stack_words;
+
+  vm->ip = H.entry_ip;
+  vm->sp = 0;
+  vm->fp = 0;
+
+#if defined(__EMSCRIPTEN__)
+  vm->stream_stdio = 0;
+  vm->capture_output = 1;
+#else
+  vm->stream_stdio = 1;
+  vm->capture_output = 0;
+#endif
+
+  return 1;
+}
+
+static int vm_run(VM* vm) {
+  while (!vm->halted) step(vm);
+
+  // Return 0 on clean halt/exit; 1 on trap.
+  if (vm->trap_msg && strcmp(vm->trap_msg, "halt") != 0 && strcmp(vm->trap_msg, "exit") != 0) return 1;
+  return 0;
+}
+
+// ------------------------------ Emscripten-friendly single-instance exports ------------------------------
+// These are usable from JS by compiling with appropriate -s EXPORTED_FUNCTIONS.
+
+static VM g_vm;
+static int g_vm_inited = 0;
+
+int svm_vm_load_from_buffer(uint8_t* zvm, uint32_t len, uint32_t stack_words) {
+  if (g_vm_inited) { vm_free(&g_vm); g_vm_inited = 0; }
+  if (!vm_init_from_container(&g_vm, zvm, (size_t)len, 0, stack_words)) return 0;
+  g_vm_inited = 1;
+  return 1;
+}
+
+int svm_vm_run_loaded(void) {
+  if (!g_vm_inited) return -2;
+  int trapped = vm_run(&g_vm);
+  if (trapped) return -1;
+  uint32_t rc = (g_vm.trap_msg && strcmp(g_vm.trap_msg, "exit") == 0) ? g_vm.trap_code : 0;
+  return (int)(rc & 0xFFu);
+}
+
+uint32_t svm_vm_output_ptr(void) {
+  if (!g_vm_inited || !g_vm.out) return 0u;
+  return (uint32_t)(uintptr_t)g_vm.out;
+}
+
+uint32_t svm_vm_output_len(void) {
+  if (!g_vm_inited) return 0u;
+  return (uint32_t)g_vm.out_len;
+}
+
+void svm_vm_output_clear(void) {
+  if (!g_vm_inited) return;
+  out_clear(&g_vm);
+}
+
+uint32_t svm_vm_trap_code(void) {
+  if (!g_vm_inited) return 0u;
+  return g_vm.trap_code;
+}
+
+uint32_t svm_vm_ip(void) {
+  if (!g_vm_inited) return 0u;
+  return g_vm.ip;
+}
+
+void svm_vm_free_loaded(void) {
+  if (!g_vm_inited) return;
+  vm_free(&g_vm);
+  g_vm_inited = 0;
+}
+
 // ------------------------------ Main ------------------------------
 
 int main(int argc, char** argv) {
@@ -786,68 +973,26 @@ int main(int argc, char** argv) {
   size_t file_len = 0;
   uint8_t* file = read_file(path, &file_len);
 
-  ZvmHeader H;
-  if (!read_zvm_header(file, file_len, &H)) {
-    fprintf(stderr, "error: not a valid ZVM1 file: %s\n", path);
-    free(file);
-    return 1;
-  }
-
-  const size_t need = 28ull + (size_t)H.code_size + (size_t)H.mem_init_size;
-  if (need > file_len) {
-    fprintf(stderr, "error: truncated ZVM1 file: %s\n", path);
-    free(file);
-    return 1;
-  }
-  if (H.mem_total_size < H.mem_init_size) {
-    fprintf(stderr, "error: invalid ZVM1 header (mem_total < mem_init): %s\n", path);
-    free(file);
-    return 1;
-  }
-  if (H.entry_ip > H.code_size) {
-    fprintf(stderr, "error: invalid ZVM1 header (entry_ip out of range): %s\n", path);
-    free(file);
-    return 1;
-  }
-
-  uint8_t* code = (uint8_t*)malloc(H.code_size ? H.code_size : 1);
-  if (!code) die("out of memory (code)");
-  memcpy(code, file + 28, H.code_size);
-
-  uint8_t* mem = (uint8_t*)calloc(H.mem_total_size ? H.mem_total_size : 1, 1);
-  if (!mem) die("out of memory (mem)");
-  memcpy(mem, file + 28 + H.code_size, H.mem_init_size);
-
-  free(file);
-
   VM vm;
-  memset(&vm, 0, sizeof(vm));
-  vm.code = code;
-  vm.code_size = H.code_size;
-  vm.mem = mem;
-  vm.mem_size = H.mem_total_size;
-  vm.stack = (uint32_t*)calloc(stack_words, sizeof(uint32_t));
-  if (!vm.stack) die("out of memory (stack)");
-  vm.stack_cap = stack_words;
+  if (!vm_init_from_container(&vm, file, file_len, 1, stack_words)) {
+    fprintf(stderr, "error: invalid or truncated ZVM1 file: %s\n", path);
+    free(file);
+    return 1;
+  }
 
-  vm.ip = H.entry_ip;
-  vm.sp = 0;
-  vm.fp = 0;
+  // Native CLI behavior: stream to stdio; do not capture output.
+  vm.stream_stdio = 1;
+  vm.capture_output = 0;
 
-  while (!vm.halted) step(&vm);
+  (void)vm_run(&vm);
 
   if (vm.trap_msg && strcmp(vm.trap_msg, "halt") != 0 && strcmp(vm.trap_msg, "exit") != 0) {
     fprintf(stderr, "\nVM TRAP: code=0x%08X ip=0x%08X (%s)\n", vm.trap_code, vm.ip, vm.trap_msg);
-    free(vm.code);
-    free(vm.mem);
-    free(vm.stack);
+    vm_free(&vm);
     return 1;
   }
 
   uint32_t rc = (vm.trap_msg && strcmp(vm.trap_msg, "exit") == 0) ? vm.trap_code : 0;
-
-  free(vm.code);
-  free(vm.mem);
-  free(vm.stack);
+  vm_free(&vm);
   return (int)(rc & 0xFFu);
 }
