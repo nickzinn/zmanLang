@@ -1,0 +1,28 @@
+func add(a, b) {
+  return a + b;
+}
+
+func twice(s) {
+  return s + "" + s;
+}
+
+func inc2(x) {
+  let y := x + 1;
+  y := y + 1;
+  return y;
+}
+
+func fact(n) {
+  if (n = 0) {
+    return 1;
+  } else {
+    return n * fact(n - 1);
+  }
+}
+
+print(text(add(2, 3)) + "\n");
+print(twice("ha") + "\n");
+print(text(inc2(40)) + "\n");
+print(text(fact(5)) + "\n");
+
+add(1, 2);

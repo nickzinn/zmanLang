@@ -111,6 +111,8 @@ typedef enum {
   TOK_IDENT,
   TOK_LET,
   TOK_CONST,
+  TOK_FUNC,
+  TOK_RETURN,
   TOK_IF,
   TOK_ELSE,
   TOK_WHILE,
@@ -136,6 +138,7 @@ typedef enum {
   TOK_RPAREN,
   TOK_LBRACE,
   TOK_RBRACE,
+  TOK_COMMA,
   TOK_SEMI,
   TOK_STRING,
   TOK_INT,
@@ -244,6 +247,8 @@ static Token next_token(Lexer* lx) {
     // keywords (v0 subset)
     if (t.len == 3 && memcmp(lx->src + t.pos, "let", 3) == 0) t.kind = TOK_LET;
     else if (t.len == 5 && memcmp(lx->src + t.pos, "const", 5) == 0) t.kind = TOK_CONST;
+    else if (t.len == 4 && memcmp(lx->src + t.pos, "func", 4) == 0) t.kind = TOK_FUNC;
+    else if (t.len == 6 && memcmp(lx->src + t.pos, "return", 6) == 0) t.kind = TOK_RETURN;
     else if (t.len == 2 && memcmp(lx->src + t.pos, "if", 2) == 0) t.kind = TOK_IF;
     else if (t.len == 4 && memcmp(lx->src + t.pos, "else", 4) == 0) t.kind = TOK_ELSE;
     else if (t.len == 5 && memcmp(lx->src + t.pos, "while", 5) == 0) t.kind = TOK_WHILE;
@@ -377,6 +382,13 @@ static Token next_token(Lexer* lx) {
   if (c == ';') {
     lx->i++;
     t.kind = TOK_SEMI;
+    t.len = 1;
+    return t;
+  }
+
+  if (c == ',') {
+    lx->i++;
+    t.kind = TOK_COMMA;
     t.len = 1;
     return t;
   }
@@ -545,6 +557,12 @@ typedef enum {
   TY_BOOL = 3,
 } Type;
 
+typedef enum {
+  REF_GLOBAL = 0,
+  REF_LOCAL = 1,
+  REF_PARAM = 2,
+} RefKind;
+
 static const char* type_name(Type t) {
   switch (t) {
     case TY_STRING: return "string";
@@ -563,6 +581,7 @@ typedef enum {
   EXPR_INT_LIT,
   EXPR_BOOL_LIT,
   EXPR_IDENT,
+  EXPR_CALL,
   EXPR_ADD,
   EXPR_SUB,
   EXPR_MUL,
@@ -582,6 +601,8 @@ typedef enum {
   EXPR_OR,
 } ExprKind;
 
+typedef struct Function Function;
+
 typedef struct Expr Expr;
 struct Expr {
   ExprKind kind;
@@ -590,7 +611,21 @@ struct Expr {
   union {
     const char* str_label; // EXPR_STR_LIT
     uint32_t int_u32; // EXPR_INT_LIT
-    struct { const char* name; size_t name_len; } ident; // EXPR_IDENT
+    struct {
+      const char* name;
+      size_t name_len;
+      RefKind ref;
+      int slot; // for locals/params: fp+slot (slot may be negative for params)
+      const char* data_label; // for globals
+      size_t param_index; // for params
+    } ident; // EXPR_IDENT
+    struct {
+      const char* name;
+      size_t name_len;
+      Expr** args;
+      size_t argc;
+      Function* fn; // resolved callee
+    } call; // EXPR_CALL
     struct { Expr* left; Expr* right; } bin; // EXPR_ADD/EXPR_SUB/EXPR_MUL/EXPR_DIVS/EXPR_MODS
     struct { Expr* inner; } unary; // EXPR_NEG
   } v;
@@ -608,6 +643,10 @@ static Expr* new_expr(ExprKind k, size_t pos) {
 static void free_expr(Expr* e) {
   if (!e) return;
   switch (e->kind) {
+    case EXPR_CALL:
+      for (size_t i = 0; i < e->v.call.argc; i++) free_expr(e->v.call.args[i]);
+      free(e->v.call.args);
+      break;
     case EXPR_ADD:
     case EXPR_SUB:
     case EXPR_MUL:
@@ -643,6 +682,8 @@ typedef enum {
   STMT_CONST,
   STMT_ASSIGN,
   STMT_PRINT,
+  STMT_RETURN,
+  STMT_EXPR,
   STMT_IF,
   STMT_WHILE,
   STMT_BLOCK,
@@ -654,9 +695,29 @@ typedef struct {
   StmtKind kind;
   size_t pos;
   union {
-    struct { const char* name; size_t name_len; Expr* value; } bind; // let/const
-    struct { const char* name; size_t name_len; Expr* value; } assign;
+    struct {
+      const char* name;
+      size_t name_len;
+      Expr* value;
+      RefKind ref;
+      int slot;
+      const char* data_label;
+      size_t param_index;
+    } bind; // let/const (ref is GLOBAL for top-level; LOCAL inside functions)
+    struct {
+      const char* name;
+      size_t name_len;
+      Expr* value;
+      RefKind ref;
+      int slot;
+      const char* data_label;
+      size_t param_index;
+      bool target_is_const;
+      Type target_type;
+    } assign;
     struct { Expr* value; } print;
+    struct { Expr* value; } ret;
+    struct { Expr* value; } expr;
     struct { Expr* cond; StmtList* then_body; StmtList* else_body; } if_; // else_body may be NULL
     struct { Expr* cond; StmtList* body; } while_;
     struct { StmtList* body; } block;
@@ -698,6 +759,12 @@ static void stmt_free(Stmt* st) {
     case STMT_PRINT:
       free_expr(st->v.print.value);
       return;
+    case STMT_RETURN:
+      free_expr(st->v.ret.value);
+      return;
+    case STMT_EXPR:
+      free_expr(st->v.expr.value);
+      return;
     case STMT_IF:
       free_expr(st->v.if_.cond);
       stmt_list_free(st->v.if_.then_body);
@@ -728,6 +795,145 @@ typedef struct {
   const char* src;
 } Parser;
 
+typedef struct {
+  char* name;
+  bool is_const;
+  Type ty; // 0 until inferred
+  int slot; // fp + slot (>=0)
+} Local;
+
+typedef struct {
+  Local* items;
+  size_t len;
+  size_t cap;
+} Locals;
+
+static void locals_init(Locals* l) {
+  l->items = NULL;
+  l->len = 0;
+  l->cap = 0;
+}
+
+static void locals_free(Locals* l) {
+  for (size_t i = 0; i < l->len; i++) free(l->items[i].name);
+  free(l->items);
+  l->items = NULL;
+  l->len = 0;
+  l->cap = 0;
+}
+
+static Local* locals_find(Locals* l, const char* name, size_t name_len) {
+  for (size_t i = 0; i < l->len; i++) {
+    if (strlen(l->items[i].name) == name_len && memcmp(l->items[i].name, name, name_len) == 0) return &l->items[i];
+  }
+  return NULL;
+}
+
+static Local* locals_add(Locals* l, const char* name, size_t name_len, bool is_const, int slot) {
+  if (locals_find(l, name, name_len)) {
+    fprintf(stderr, "zmc: duplicate local '%.*s'\n", (int)name_len, name);
+    exit(2);
+  }
+  if (l->len == l->cap) {
+    size_t new_cap = l->cap ? (l->cap * 2) : 16;
+    l->items = (Local*)xrealloc(l->items, new_cap * sizeof(Local));
+    l->cap = new_cap;
+  }
+  Local* it = &l->items[l->len++];
+  memset(it, 0, sizeof(*it));
+  it->name = (char*)xmalloc(name_len + 1);
+  memcpy(it->name, name, name_len);
+  it->name[name_len] = 0;
+  it->is_const = is_const;
+  it->ty = 0;
+  it->slot = slot;
+  return it;
+}
+
+struct Function {
+  char* name;
+  char* label;
+  size_t argc;
+  Type* param_types; // length argc
+  char** param_names; // length argc
+  Type ret_type; // 0 until inferred
+  // locals (fp+0..)
+  Locals locals;
+  int nlocals;
+  // body
+  StmtList* body;
+};
+
+typedef struct {
+  Function* items;
+  size_t len;
+  size_t cap;
+} FuncTable;
+
+static void ft_init(FuncTable* ft) {
+  ft->items = NULL;
+  ft->len = 0;
+  ft->cap = 0;
+}
+
+static void ft_free(FuncTable* ft) {
+  for (size_t i = 0; i < ft->len; i++) {
+    Function* f = &ft->items[i];
+    free(f->name);
+    free(f->label);
+    free(f->param_types);
+    if (f->param_names) {
+      for (size_t j = 0; j < f->argc; j++) free(f->param_names[j]);
+      free(f->param_names);
+    }
+    locals_free(&f->locals);
+    stmt_list_free(f->body);
+  }
+  free(ft->items);
+  ft->items = NULL;
+  ft->len = 0;
+  ft->cap = 0;
+}
+
+static Function* ft_find(FuncTable* ft, const char* name, size_t name_len) {
+  for (size_t i = 0; i < ft->len; i++) {
+    if (strlen(ft->items[i].name) == name_len && memcmp(ft->items[i].name, name, name_len) == 0) return &ft->items[i];
+  }
+  return NULL;
+}
+
+static Function* ft_add(FuncTable* ft, const char* name, size_t name_len, size_t argc) {
+  if (ft_find(ft, name, name_len)) {
+    fprintf(stderr, "zmc: duplicate function '%.*s'\n", (int)name_len, name);
+    exit(2);
+  }
+  if (ft->len == ft->cap) {
+    size_t new_cap = ft->cap ? (ft->cap * 2) : 16;
+    ft->items = (Function*)xrealloc(ft->items, new_cap * sizeof(Function));
+    ft->cap = new_cap;
+  }
+  size_t id = ft->len++;
+  Function* f = &ft->items[id];
+  memset(f, 0, sizeof(*f));
+  f->name = (char*)xmalloc(name_len + 1);
+  memcpy(f->name, name, name_len);
+  f->name[name_len] = 0;
+  char lbl[128];
+  snprintf(lbl, sizeof(lbl), "fn_%s", f->name);
+  f->label = (char*)xmalloc(strlen(lbl) + 1);
+  strcpy(f->label, lbl);
+  f->argc = argc;
+  f->param_types = (Type*)xmalloc(argc * sizeof(Type));
+  for (size_t i = 0; i < argc; i++) f->param_types[i] = 0;
+  f->param_names = (char**)xmalloc(argc * sizeof(char*));
+  for (size_t i = 0; i < argc; i++) f->param_names[i] = NULL;
+  f->ret_type = 0;
+  locals_init(&f->locals);
+  f->nlocals = 0;
+  f->body = NULL;
+  return f;
+}
+
 static void parse_init(Parser* p, const char* src, size_t len) {
   p->src = src;
   lex_init(&p->lx, src, len);
@@ -754,18 +960,99 @@ static bool ident_is(Parser* p, const char* s) {
   return memcmp(p->src + p->cur.pos, s, n) == 0;
 }
 
-static Expr* parse_expr(Parser* p, StrPool* sp, const Globals* globals);
-static StmtList* parse_block(Parser* p, StrPool* sp, Globals* globals);
+typedef struct {
+  Globals* globals;
+  FuncTable* funcs;
+  Function* cur_fn; // NULL at top-level
+} ParseCtx;
 
-static Type require_type(Type got, Type want, const char* ctx) {
-  if (got != want) {
-    fprintf(stderr, "zmc: type error (%s): expected %s, got %s\n", ctx, type_name(want), type_name(got));
-    exit(2);
+static int fn_param_index(Function* f, const char* name, size_t name_len) {
+  for (size_t i = 0; i < f->argc; i++) {
+    if (strlen(f->param_names[i]) == name_len && memcmp(f->param_names[i], name, name_len) == 0) return (int)i;
   }
-  return got;
+  return -1;
 }
 
-static Expr* parse_primary(Parser* p, StrPool* sp, const Globals* globals) {
+static void set_expr_type(ParseCtx* ctx, Expr* e, Type ty);
+
+static void require_expr_type(ParseCtx* ctx, Expr* e, Type want, const char* where) {
+  if (e->ty == 0) {
+    set_expr_type(ctx, e, want);
+    return;
+  }
+  if (e->ty != want) {
+    fprintf(stderr, "zmc: type error (%s): expected %s, got %s\n", where, type_name(want), type_name(e->ty));
+    exit(2);
+  }
+}
+
+static Expr* parse_expr(Parser* p, StrPool* sp, ParseCtx* ctx);
+static StmtList* parse_block(Parser* p, StrPool* sp, ParseCtx* ctx);
+
+static void resolve_ident_expr(ParseCtx* ctx, Expr* e) {
+  if (!ctx->cur_fn) {
+    const Global* g = globals_find(ctx->globals, e->v.ident.name, e->v.ident.name_len);
+    if (!g || g->ty == 0) {
+      fprintf(stderr, "zmc: undefined identifier '%.*s'\n", (int)e->v.ident.name_len, e->v.ident.name);
+      exit(2);
+    }
+    e->v.ident.ref = REF_GLOBAL;
+    e->v.ident.data_label = g->data_label;
+    e->ty = (Type)g->ty;
+    return;
+  }
+
+  Local* l = locals_find(&ctx->cur_fn->locals, e->v.ident.name, e->v.ident.name_len);
+  if (l) {
+    e->v.ident.ref = REF_LOCAL;
+    e->v.ident.slot = l->slot;
+    e->ty = l->ty;
+    return;
+  }
+
+  int pi = fn_param_index(ctx->cur_fn, e->v.ident.name, e->v.ident.name_len);
+  if (pi >= 0) {
+    e->v.ident.ref = REF_PARAM;
+    e->v.ident.param_index = (size_t)pi;
+    e->v.ident.slot = -(int)(2 + ctx->cur_fn->argc - (size_t)pi);
+    e->ty = ctx->cur_fn->param_types[pi];
+    return;
+  }
+
+  const Global* g = globals_find(ctx->globals, e->v.ident.name, e->v.ident.name_len);
+  if (!g || g->ty == 0) {
+    fprintf(stderr, "zmc: undefined identifier '%.*s'\n", (int)e->v.ident.name_len, e->v.ident.name);
+    exit(2);
+  }
+  e->v.ident.ref = REF_GLOBAL;
+  e->v.ident.data_label = g->data_label;
+  e->ty = (Type)g->ty;
+}
+
+static void set_expr_type(ParseCtx* ctx, Expr* e, Type ty) {
+  if (ty == 0) return;
+  if (e->ty == 0) {
+    e->ty = ty;
+  } else if (e->ty != ty) {
+    fprintf(stderr, "zmc: type error: expected %s, got %s\n", type_name(ty), type_name(e->ty));
+    exit(2);
+  }
+
+  if (ctx->cur_fn && e->kind == EXPR_IDENT) {
+    if (e->v.ident.ref == REF_LOCAL) {
+      Local* l = locals_find(&ctx->cur_fn->locals, e->v.ident.name, e->v.ident.name_len);
+      if (l && l->ty == 0) l->ty = ty;
+    } else if (e->v.ident.ref == REF_PARAM) {
+      if (ctx->cur_fn->param_types[e->v.ident.param_index] == 0) ctx->cur_fn->param_types[e->v.ident.param_index] = ty;
+    }
+  }
+
+  if (e->kind == EXPR_CALL && e->v.call.fn) {
+    if (e->v.call.fn->ret_type == 0) e->v.call.fn->ret_type = ty;
+  }
+}
+
+static Expr* parse_primary(Parser* p, StrPool* sp, ParseCtx* ctx) {
   if (tok_is(p, TOK_TRUE)) {
     Expr* e = new_expr(EXPR_BOOL_LIT, p->cur.pos);
     e->v.int_u32 = 1;
@@ -785,8 +1072,8 @@ static Expr* parse_primary(Parser* p, StrPool* sp, const Globals* globals) {
     advance(p);
     expect(p, TOK_LPAREN, "'('");
     advance(p);
-    Expr* inner = parse_expr(p, sp, globals);
-    require_type(inner->ty, TY_I32, "text() argument");
+    Expr* inner = parse_expr(p, sp, ctx);
+    require_expr_type(ctx, inner, TY_I32, "text() argument");
     expect(p, TOK_RPAREN, "')'");
     advance(p);
     Expr* e = new_expr(EXPR_TEXT, pos);
@@ -800,8 +1087,8 @@ static Expr* parse_primary(Parser* p, StrPool* sp, const Globals* globals) {
     advance(p);
     expect(p, TOK_LPAREN, "'('");
     advance(p);
-    Expr* inner = parse_expr(p, sp, globals);
-    require_type(inner->ty, TY_STRING, "number() argument");
+    Expr* inner = parse_expr(p, sp, ctx);
+    require_expr_type(ctx, inner, TY_STRING, "number() argument");
     expect(p, TOK_RPAREN, "')'");
     advance(p);
     Expr* e = new_expr(EXPR_NUMBER, pos);
@@ -825,23 +1112,74 @@ static Expr* parse_primary(Parser* p, StrPool* sp, const Globals* globals) {
     return e;
   }
   if (tok_is(p, TOK_IDENT)) {
-    Expr* e = new_expr(EXPR_IDENT, p->cur.pos);
-    e->v.ident.name = p->src + p->cur.pos;
-    e->v.ident.name_len = p->cur.len;
-
-    const Global* g = globals_find(globals, e->v.ident.name, e->v.ident.name_len);
-    if (!g || g->ty == 0) {
-      fprintf(stderr, "zmc: undefined identifier '%.*s'\n", (int)e->v.ident.name_len, e->v.ident.name);
-      exit(2);
-    }
-    e->ty = (Type)g->ty;
-
+    size_t pos = p->cur.pos;
+    const char* name = p->src + p->cur.pos;
+    size_t name_len = p->cur.len;
     advance(p);
+
+    if (tok_is(p, TOK_LPAREN)) {
+      advance(p);
+      Expr** args = NULL;
+      size_t argc = 0;
+      size_t cap = 0;
+      if (!tok_is(p, TOK_RPAREN)) {
+        for (;;) {
+          if (argc == cap) {
+            size_t new_cap = cap ? (cap * 2) : 4;
+            args = (Expr**)xrealloc(args, new_cap * sizeof(Expr*));
+            cap = new_cap;
+          }
+          args[argc++] = parse_expr(p, sp, ctx);
+          if (tok_is(p, TOK_COMMA)) {
+            advance(p);
+            continue;
+          }
+          break;
+        }
+      }
+      expect(p, TOK_RPAREN, "')'");
+      advance(p);
+
+      Function* fn = ft_find(ctx->funcs, name, name_len);
+      if (!fn) {
+        fprintf(stderr, "zmc: call to undefined function '%.*s'\n", (int)name_len, name);
+        exit(2);
+      }
+      if (fn->argc != argc) {
+        fprintf(stderr, "zmc: wrong argument count calling '%s': expected %zu, got %zu\n", fn->name, fn->argc, argc);
+        exit(2);
+      }
+      for (size_t i = 0; i < argc; i++) {
+        if (fn->param_types[i] != 0) {
+          require_expr_type(ctx, args[i], fn->param_types[i], "call argument");
+        } else if (args[i]->ty != 0) {
+          fn->param_types[i] = args[i]->ty;
+        }
+      }
+
+      Expr* e = new_expr(EXPR_CALL, pos);
+      e->v.call.name = name;
+      e->v.call.name_len = name_len;
+      e->v.call.args = args;
+      e->v.call.argc = argc;
+      e->v.call.fn = fn;
+      e->ty = fn->ret_type;
+      return e;
+    }
+
+    Expr* e = new_expr(EXPR_IDENT, pos);
+    e->v.ident.name = name;
+    e->v.ident.name_len = name_len;
+    e->v.ident.ref = REF_GLOBAL;
+    e->v.ident.slot = 0;
+    e->v.ident.data_label = NULL;
+    e->v.ident.param_index = 0;
+    resolve_ident_expr(ctx, e);
     return e;
   }
   if (tok_is(p, TOK_LPAREN)) {
     advance(p);
-    Expr* e = parse_expr(p, sp, globals);
+    Expr* e = parse_expr(p, sp, ctx);
     expect(p, TOK_RPAREN, "')'");
     advance(p);
     return e;
@@ -851,15 +1189,16 @@ static Expr* parse_primary(Parser* p, StrPool* sp, const Globals* globals) {
   exit(2);
 }
 
-static Expr* parse_unary(Parser* p, StrPool* sp, const Globals* globals) {
+static Expr* parse_unary(Parser* p, StrPool* sp, ParseCtx* ctx) {
   if (tok_is(p, TOK_BANG) || tok_is(p, TOK_NOT)) {
     size_t pos = p->cur.pos;
     advance(p);
-    Expr* inner = parse_unary(p, sp, globals);
-    if (!(inner->ty == TY_BOOL || inner->ty == TY_I32)) {
+    Expr* inner = parse_unary(p, sp, ctx);
+    if (!(inner->ty == TY_BOOL || inner->ty == TY_I32 || inner->ty == 0)) {
       fprintf(stderr, "zmc: type error (!/not): expected bool or i32, got %s\n", type_name(inner->ty));
       exit(2);
     }
+    if (inner->ty == 0) set_expr_type(ctx, inner, TY_I32);
     Expr* e = new_expr(EXPR_LNOT, pos);
     e->v.unary.inner = inner;
     e->ty = TY_BOOL;
@@ -868,25 +1207,25 @@ static Expr* parse_unary(Parser* p, StrPool* sp, const Globals* globals) {
   if (tok_is(p, TOK_MINUS)) {
     size_t pos = p->cur.pos;
     advance(p);
-    Expr* inner = parse_unary(p, sp, globals);
-    require_type(inner->ty, TY_I32, "unary -");
+    Expr* inner = parse_unary(p, sp, ctx);
+    require_expr_type(ctx, inner, TY_I32, "unary -");
     Expr* e = new_expr(EXPR_NEG, pos);
     e->v.unary.inner = inner;
     e->ty = TY_I32;
     return e;
   }
-  return parse_primary(p, sp, globals);
+  return parse_primary(p, sp, ctx);
 }
 
-static Expr* parse_mul(Parser* p, StrPool* sp, const Globals* globals) {
-  Expr* left = parse_unary(p, sp, globals);
+static Expr* parse_mul(Parser* p, StrPool* sp, ParseCtx* ctx) {
+  Expr* left = parse_unary(p, sp, ctx);
   while (tok_is(p, TOK_STAR) || tok_is(p, TOK_SLASH) || tok_is(p, TOK_PERCENT)) {
     TokKind op = p->cur.kind;
     size_t pos = p->cur.pos;
     advance(p);
-    Expr* right = parse_unary(p, sp, globals);
-    require_type(left->ty, TY_I32, "mul/div/mod left");
-    require_type(right->ty, TY_I32, "mul/div/mod right");
+    Expr* right = parse_unary(p, sp, ctx);
+    require_expr_type(ctx, left, TY_I32, "mul/div/mod left");
+    require_expr_type(ctx, right, TY_I32, "mul/div/mod right");
 
     ExprKind k = EXPR_MUL;
     if (op == TOK_STAR) k = EXPR_MUL;
@@ -902,15 +1241,17 @@ static Expr* parse_mul(Parser* p, StrPool* sp, const Globals* globals) {
   return left;
 }
 
-static Expr* parse_add(Parser* p, StrPool* sp, const Globals* globals) {
-  Expr* left = parse_mul(p, sp, globals);
+static Expr* parse_add(Parser* p, StrPool* sp, ParseCtx* ctx) {
+  Expr* left = parse_mul(p, sp, ctx);
   while (tok_is(p, TOK_PLUS) || tok_is(p, TOK_MINUS)) {
     TokKind op = p->cur.kind;
     size_t pos = p->cur.pos;
     advance(p);
-    Expr* right = parse_mul(p, sp, globals);
+    Expr* right = parse_mul(p, sp, ctx);
 
-    if (op == TOK_PLUS && left->ty == TY_STRING && right->ty == TY_STRING) {
+    if (op == TOK_PLUS && (left->ty == TY_STRING || right->ty == TY_STRING)) {
+      require_expr_type(ctx, left, TY_STRING, "string concat left");
+      require_expr_type(ctx, right, TY_STRING, "string concat right");
       Expr* e = new_expr(EXPR_ADD, pos);
       e->v.bin.left = left;
       e->v.bin.right = right;
@@ -920,8 +1261,8 @@ static Expr* parse_add(Parser* p, StrPool* sp, const Globals* globals) {
     }
 
     // numeric + / -
-    require_type(left->ty, TY_I32, "add/sub left");
-    require_type(right->ty, TY_I32, "add/sub right");
+    require_expr_type(ctx, left, TY_I32, "add/sub left");
+    require_expr_type(ctx, right, TY_I32, "add/sub right");
 
     ExprKind k = (op == TOK_PLUS) ? EXPR_ADD : EXPR_SUB;
     Expr* e = new_expr(k, pos);
@@ -933,14 +1274,14 @@ static Expr* parse_add(Parser* p, StrPool* sp, const Globals* globals) {
   return left;
 }
 
-static Expr* parse_cmp(Parser* p, StrPool* sp, const Globals* globals) {
+static Expr* parse_cmp(Parser* p, StrPool* sp, ParseCtx* ctx) {
   // comparisons have lower precedence than +-
-  Expr* left = parse_add(p, sp, globals);
+  Expr* left = parse_add(p, sp, ctx);
   while (tok_is(p, TOK_LT) || tok_is(p, TOK_GT) || tok_is(p, TOK_LE) || tok_is(p, TOK_GE) || tok_is(p, TOK_EQ) || tok_is(p, TOK_NE)) {
     TokKind op = p->cur.kind;
     size_t pos = p->cur.pos;
     advance(p);
-    Expr* right = parse_add(p, sp, globals);
+    Expr* right = parse_add(p, sp, ctx);
 
     ExprKind k = EXPR_EQ;
     if (op == TOK_LT) k = EXPR_LT;
@@ -954,9 +1295,15 @@ static Expr* parse_cmp(Parser* p, StrPool* sp, const Globals* globals) {
     // - < > <= >= require i32
     // - = != require identical operand types (i32, bool, string)
     if (k == EXPR_LT || k == EXPR_GT || k == EXPR_LE || k == EXPR_GE) {
-      require_type(left->ty, TY_I32, "comparison left");
-      require_type(right->ty, TY_I32, "comparison right");
+      require_expr_type(ctx, left, TY_I32, "comparison left");
+      require_expr_type(ctx, right, TY_I32, "comparison right");
     } else {
+      if (left->ty == 0 && right->ty != 0) set_expr_type(ctx, left, right->ty);
+      else if (right->ty == 0 && left->ty != 0) set_expr_type(ctx, right, left->ty);
+      else if (left->ty == 0 && right->ty == 0) {
+        set_expr_type(ctx, left, TY_I32);
+        set_expr_type(ctx, right, TY_I32);
+      }
       if (left->ty != right->ty) {
         fprintf(stderr, "zmc: type error (equality): mismatched types %s and %s\n", type_name(left->ty), type_name(right->ty));
         exit(2);
@@ -976,12 +1323,14 @@ static Expr* parse_cmp(Parser* p, StrPool* sp, const Globals* globals) {
   return left;
 }
 
-static Expr* parse_and(Parser* p, StrPool* sp, const Globals* globals) {
-  Expr* left = parse_cmp(p, sp, globals);
+static Expr* parse_and(Parser* p, StrPool* sp, ParseCtx* ctx) {
+  Expr* left = parse_cmp(p, sp, ctx);
   while (tok_is(p, TOK_AND)) {
     size_t pos = p->cur.pos;
     advance(p);
-    Expr* right = parse_cmp(p, sp, globals);
+    Expr* right = parse_cmp(p, sp, ctx);
+    if (left->ty == 0) set_expr_type(ctx, left, TY_I32);
+    if (right->ty == 0) set_expr_type(ctx, right, TY_I32);
     if (!(left->ty == TY_BOOL || left->ty == TY_I32)) {
       fprintf(stderr, "zmc: type error (and): left must be bool or i32, got %s\n", type_name(left->ty));
       exit(2);
@@ -999,12 +1348,14 @@ static Expr* parse_and(Parser* p, StrPool* sp, const Globals* globals) {
   return left;
 }
 
-static Expr* parse_or(Parser* p, StrPool* sp, const Globals* globals) {
-  Expr* left = parse_and(p, sp, globals);
+static Expr* parse_or(Parser* p, StrPool* sp, ParseCtx* ctx) {
+  Expr* left = parse_and(p, sp, ctx);
   while (tok_is(p, TOK_OR)) {
     size_t pos = p->cur.pos;
     advance(p);
-    Expr* right = parse_and(p, sp, globals);
+    Expr* right = parse_and(p, sp, ctx);
+    if (left->ty == 0) set_expr_type(ctx, left, TY_I32);
+    if (right->ty == 0) set_expr_type(ctx, right, TY_I32);
     if (!(left->ty == TY_BOOL || left->ty == TY_I32)) {
       fprintf(stderr, "zmc: type error (or): left must be bool or i32, got %s\n", type_name(left->ty));
       exit(2);
@@ -1022,13 +1373,13 @@ static Expr* parse_or(Parser* p, StrPool* sp, const Globals* globals) {
   return left;
 }
 
-static Expr* parse_expr(Parser* p, StrPool* sp, const Globals* globals) {
-  return parse_or(p, sp, globals);
+static Expr* parse_expr(Parser* p, StrPool* sp, ParseCtx* ctx) {
+  return parse_or(p, sp, ctx);
 }
 
-static void parse_stmt(Parser* p, StrPool* sp, Globals* globals, StmtList* out);
+static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out);
 
-static StmtList* parse_block(Parser* p, StrPool* sp, Globals* globals) {
+static StmtList* parse_block(Parser* p, StrPool* sp, ParseCtx* ctx) {
   expect(p, TOK_LBRACE, "'{' ");
   advance(p);
   StmtList* body = stmt_list_new();
@@ -1037,16 +1388,16 @@ static StmtList* parse_block(Parser* p, StrPool* sp, Globals* globals) {
       fprintf(stderr, "zmc: expected '}' before EOF\n");
       exit(2);
     }
-    parse_stmt(p, sp, globals, body);
+    parse_stmt(p, sp, ctx, body);
   }
   advance(p);
   return body;
 }
 
-static void parse_stmt(Parser* p, StrPool* sp, Globals* globals, StmtList* out) {
+static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
   if (tok_is(p, TOK_LBRACE)) {
     size_t pos = p->cur.pos;
-    StmtList* body = parse_block(p, sp, globals);
+    StmtList* body = parse_block(p, sp, ctx);
     Stmt st;
     memset(&st, 0, sizeof(st));
     st.kind = STMT_BLOCK;
@@ -1056,24 +1407,49 @@ static void parse_stmt(Parser* p, StrPool* sp, Globals* globals, StmtList* out) 
     return;
   }
 
+  if (tok_is(p, TOK_RETURN)) {
+    if (!ctx->cur_fn) {
+      fprintf(stderr, "zmc: return is only valid inside a function\n");
+      exit(2);
+    }
+    size_t pos = p->cur.pos;
+    advance(p);
+    Expr* value = parse_expr(p, sp, ctx);
+    expect(p, TOK_SEMI, "';'");
+    advance(p);
+
+    if (ctx->cur_fn->ret_type == 0 && value->ty != 0) ctx->cur_fn->ret_type = value->ty;
+    if (ctx->cur_fn->ret_type != 0) require_expr_type(ctx, value, ctx->cur_fn->ret_type, "return");
+    if (ctx->cur_fn->ret_type == 0 && value->ty != 0) ctx->cur_fn->ret_type = value->ty;
+
+    Stmt st;
+    memset(&st, 0, sizeof(st));
+    st.kind = STMT_RETURN;
+    st.pos = pos;
+    st.v.ret.value = value;
+    stmt_list_push(out, st);
+    return;
+  }
+
   if (tok_is(p, TOK_IF)) {
     size_t pos = p->cur.pos;
     advance(p);
     expect(p, TOK_LPAREN, "'('");
     advance(p);
-    Expr* cond = parse_expr(p, sp, globals);
-    if (!(cond->ty == TY_BOOL || cond->ty == TY_I32)) {
+    Expr* cond = parse_expr(p, sp, ctx);
+    if (!(cond->ty == TY_BOOL || cond->ty == TY_I32 || cond->ty == 0)) {
       fprintf(stderr, "zmc: type error (if condition): expected bool or i32, got %s\n", type_name(cond->ty));
       exit(2);
     }
+    if (cond->ty == 0) set_expr_type(ctx, cond, TY_I32);
     expect(p, TOK_RPAREN, "')'");
     advance(p);
 
-    StmtList* then_body = parse_block(p, sp, globals);
+    StmtList* then_body = parse_block(p, sp, ctx);
     StmtList* else_body = NULL;
     if (tok_is(p, TOK_ELSE)) {
       advance(p);
-      else_body = parse_block(p, sp, globals);
+      else_body = parse_block(p, sp, ctx);
     }
 
     Stmt st;
@@ -1092,14 +1468,15 @@ static void parse_stmt(Parser* p, StrPool* sp, Globals* globals, StmtList* out) 
     advance(p);
     expect(p, TOK_LPAREN, "'('");
     advance(p);
-    Expr* cond = parse_expr(p, sp, globals);
-    if (!(cond->ty == TY_BOOL || cond->ty == TY_I32)) {
+    Expr* cond = parse_expr(p, sp, ctx);
+    if (!(cond->ty == TY_BOOL || cond->ty == TY_I32 || cond->ty == 0)) {
       fprintf(stderr, "zmc: type error (while condition): expected bool or i32, got %s\n", type_name(cond->ty));
       exit(2);
     }
+    if (cond->ty == 0) set_expr_type(ctx, cond, TY_I32);
     expect(p, TOK_RPAREN, "')'");
     advance(p);
-    StmtList* body = parse_block(p, sp, globals);
+    StmtList* body = parse_block(p, sp, ctx);
 
     Stmt st;
     memset(&st, 0, sizeof(st));
@@ -1124,13 +1501,27 @@ static void parse_stmt(Parser* p, StrPool* sp, Globals* globals, StmtList* out) 
     expect(p, TOK_ASSIGN, "':='");
     advance(p);
 
-    Expr* value = parse_expr(p, sp, globals);
+    Expr* value = parse_expr(p, sp, ctx);
 
     expect(p, TOK_SEMI, "';'");
     advance(p);
 
-    Global* g = globals_add(globals, name_ptr, name_len, is_const);
-    globals_set_type(g, value->ty);
+    RefKind ref = REF_GLOBAL;
+    int slot = 0;
+    const char* data_label = NULL;
+    size_t param_index = 0;
+
+    if (ctx->cur_fn) {
+      ref = REF_LOCAL;
+      slot = ctx->cur_fn->nlocals;
+      Local* l = locals_add(&ctx->cur_fn->locals, name_ptr, name_len, is_const, slot);
+      l->ty = value->ty;
+      ctx->cur_fn->nlocals++;
+    } else {
+      Global* g = globals_add(ctx->globals, name_ptr, name_len, is_const);
+      globals_set_type(g, value->ty);
+      data_label = g->data_label;
+    }
 
     Stmt st;
     memset(&st, 0, sizeof(st));
@@ -1139,6 +1530,10 @@ static void parse_stmt(Parser* p, StrPool* sp, Globals* globals, StmtList* out) 
     st.v.bind.name = name_ptr;
     st.v.bind.name_len = name_len;
     st.v.bind.value = value;
+    st.v.bind.ref = ref;
+    st.v.bind.slot = slot;
+    st.v.bind.data_label = data_label;
+    st.v.bind.param_index = param_index;
     stmt_list_push(out, st);
     return;
   }
@@ -1150,11 +1545,12 @@ static void parse_stmt(Parser* p, StrPool* sp, Globals* globals, StmtList* out) 
     expect(p, TOK_LPAREN, "'('");
     advance(p);
 
-    Expr* value = parse_expr(p, sp, globals);
-    if (!(value->ty == TY_STRING || value->ty == TY_I32)) {
+    Expr* value = parse_expr(p, sp, ctx);
+    if (!(value->ty == TY_STRING || value->ty == TY_I32 || value->ty == 0)) {
       fprintf(stderr, "zmc: type error (print() argument): expected string or i32, got %s\n", type_name(value->ty));
       exit(2);
     }
+    if (value->ty == 0) set_expr_type(ctx, value, TY_I32);
 
     expect(p, TOK_RPAREN, "')'");
     advance(p);
@@ -1171,34 +1567,74 @@ static void parse_stmt(Parser* p, StrPool* sp, Globals* globals, StmtList* out) 
     return;
   }
 
-  // assignment statement: <ident> := <expr>;
-  if (tok_is(p, TOK_IDENT)) {
-    size_t pos = p->cur.pos;
-    const char* name_ptr = p->src + p->cur.pos;
-    size_t name_len = p->cur.len;
+  // Expression statement or assignment.
+  // Parse an expression first; if followed by ':=' treat it as assignment to an identifier.
+  Expr* first = parse_expr(p, sp, ctx);
+  if (tok_is(p, TOK_ASSIGN)) {
+    if (first->kind != EXPR_IDENT) {
+      fprintf(stderr, "zmc: left-hand side of ':=' must be an identifier\n");
+      exit(2);
+    }
+    size_t pos = first->pos;
+    const char* name_ptr = first->v.ident.name;
+    size_t name_len = first->v.ident.name_len;
+    free_expr(first);
+
     advance(p);
-
-    expect(p, TOK_ASSIGN, "':='");
-    advance(p);
-
-    Expr* value = parse_expr(p, sp, globals);
-
+    Expr* value = parse_expr(p, sp, ctx);
     expect(p, TOK_SEMI, "';'");
     advance(p);
 
-    const Global* g = globals_find(globals, name_ptr, name_len);
-    if (!g) {
-      fprintf(stderr, "zmc: assignment to undefined identifier '%.*s'\n", (int)name_len, name_ptr);
-      exit(2);
+    RefKind ref = REF_GLOBAL;
+    int slot = 0;
+    const char* data_label = NULL;
+    size_t param_index = 0;
+    bool target_is_const = false;
+    Type target_type = 0;
+
+    if (ctx->cur_fn) {
+      Local* l = locals_find(&ctx->cur_fn->locals, name_ptr, name_len);
+      if (l) {
+        ref = REF_LOCAL;
+        slot = l->slot;
+        target_is_const = l->is_const;
+        target_type = l->ty;
+      } else {
+        int pi = fn_param_index(ctx->cur_fn, name_ptr, name_len);
+        if (pi >= 0) {
+          ref = REF_PARAM;
+          param_index = (size_t)pi;
+          slot = -(int)(2 + ctx->cur_fn->argc - (size_t)pi);
+          target_is_const = false;
+          target_type = ctx->cur_fn->param_types[pi];
+        }
+      }
     }
-    if (g->is_const) {
+    if (ref == REF_GLOBAL) {
+      const Global* g = globals_find(ctx->globals, name_ptr, name_len);
+      if (!g) {
+        fprintf(stderr, "zmc: assignment to undefined identifier '%.*s'\n", (int)name_len, name_ptr);
+        exit(2);
+      }
+      target_is_const = g->is_const;
+      target_type = (Type)g->ty;
+      data_label = g->data_label;
+    }
+
+    if (target_is_const) {
       fprintf(stderr, "zmc: cannot assign to const '%.*s'\n", (int)name_len, name_ptr);
       exit(2);
     }
-    if ((Type)g->ty != value->ty) {
-      fprintf(stderr, "zmc: type error (assignment): '%.*s' is %s but RHS is %s\n",
-              (int)name_len, name_ptr, type_name((Type)g->ty), type_name(value->ty));
-      exit(2);
+    if (target_type != 0) {
+      require_expr_type(ctx, value, target_type, "assignment");
+    } else if (value->ty != 0) {
+      target_type = value->ty;
+      if (ref == REF_LOCAL) {
+        Local* l = locals_find(&ctx->cur_fn->locals, name_ptr, name_len);
+        if (l && l->ty == 0) l->ty = target_type;
+      } else if (ref == REF_PARAM) {
+        ctx->cur_fn->param_types[param_index] = target_type;
+      }
     }
 
     Stmt st;
@@ -1208,17 +1644,109 @@ static void parse_stmt(Parser* p, StrPool* sp, Globals* globals, StmtList* out) 
     st.v.assign.name = name_ptr;
     st.v.assign.name_len = name_len;
     st.v.assign.value = value;
+    st.v.assign.ref = ref;
+    st.v.assign.slot = slot;
+    st.v.assign.data_label = data_label;
+    st.v.assign.param_index = param_index;
+    st.v.assign.target_is_const = target_is_const;
+    st.v.assign.target_type = target_type;
     stmt_list_push(out, st);
     return;
   }
 
-  fprintf(stderr, "zmc: expected statement at byte %zu\n", p->cur.pos);
-  exit(2);
+  expect(p, TOK_SEMI, "';'");
+  advance(p);
+  Stmt st;
+  memset(&st, 0, sizeof(st));
+  st.kind = STMT_EXPR;
+  st.pos = first->pos;
+  st.v.expr.value = first;
+  stmt_list_push(out, st);
 }
 
-static void parse_program(Parser* p, StrPool* sp, Globals* globals, StmtList* out) {
+static bool stmt_list_has_return(const StmtList* s) {
+  for (size_t i = 0; i < s->len; i++) {
+    const Stmt* st = &s->items[i];
+    if (st->kind == STMT_RETURN) return true;
+    if (st->kind == STMT_BLOCK && stmt_list_has_return(st->v.block.body)) return true;
+    if (st->kind == STMT_IF) {
+      if (stmt_list_has_return(st->v.if_.then_body)) return true;
+      if (st->v.if_.else_body && stmt_list_has_return(st->v.if_.else_body)) return true;
+    }
+    if (st->kind == STMT_WHILE && stmt_list_has_return(st->v.while_.body)) return true;
+  }
+  return false;
+}
+
+static void parse_func_def(Parser* p, StrPool* sp, ParseCtx* ctx) {
+  expect(p, TOK_FUNC, "func");
+  advance(p);
+  expect(p, TOK_IDENT, "function name");
+  const char* name_ptr = p->src + p->cur.pos;
+  size_t name_len = p->cur.len;
+  advance(p);
+
+  expect(p, TOK_LPAREN, "'('");
+  advance(p);
+
+  const char** param_ptrs = NULL;
+  size_t* param_lens = NULL;
+  size_t argc = 0;
+  size_t cap = 0;
+  if (!tok_is(p, TOK_RPAREN)) {
+    for (;;) {
+      expect(p, TOK_IDENT, "parameter name");
+      if (argc == cap) {
+        size_t new_cap = cap ? (cap * 2) : 4;
+        param_ptrs = (const char**)xrealloc((void*)param_ptrs, new_cap * sizeof(const char*));
+        param_lens = (size_t*)xrealloc(param_lens, new_cap * sizeof(size_t));
+        cap = new_cap;
+      }
+      param_ptrs[argc] = p->src + p->cur.pos;
+      param_lens[argc] = p->cur.len;
+      argc++;
+      advance(p);
+      if (tok_is(p, TOK_COMMA)) {
+        advance(p);
+        continue;
+      }
+      break;
+    }
+  }
+  expect(p, TOK_RPAREN, "')'");
+  advance(p);
+
+  Function* fn = ft_add(ctx->funcs, name_ptr, name_len, argc);
+  for (size_t i = 0; i < argc; i++) {
+    fn->param_names[i] = (char*)xmalloc(param_lens[i] + 1);
+    memcpy(fn->param_names[i], param_ptrs[i], param_lens[i]);
+    fn->param_names[i][param_lens[i]] = 0;
+  }
+  free(param_ptrs);
+  free(param_lens);
+
+  Function* prev = ctx->cur_fn;
+  ctx->cur_fn = fn;
+  fn->body = parse_block(p, sp, ctx);
+  ctx->cur_fn = prev;
+
+  if (!stmt_list_has_return(fn->body)) {
+    fprintf(stderr, "zmc: function '%s' must contain a return statement (v0)\n", fn->name);
+    exit(2);
+  }
+  if (fn->ret_type == 0) {
+    fprintf(stderr, "zmc: could not infer return type for function '%s'\n", fn->name);
+    exit(2);
+  }
+}
+
+static void parse_program(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out_main) {
   while (!tok_is(p, TOK_EOF)) {
-    parse_stmt(p, sp, globals, out);
+    if (tok_is(p, TOK_FUNC)) {
+      parse_func_def(p, sp, ctx);
+      continue;
+    }
+    parse_stmt(p, sp, ctx, out_main);
   }
 }
 
@@ -1297,7 +1825,7 @@ static bool emit_bytes_as_ascii(FILE* out, const uint8_t* bytes, size_t n) {
   return true;
 }
 
-static void emit_expr_asm(FILE* out, const Expr* e, const Globals* globals, CodeGen* cg) {
+static void emit_expr_asm(FILE* out, const Expr* e, CodeGen* cg) {
   switch (e->kind) {
     case EXPR_STR_LIT:
       fprintf(out, "  PUSHI %s\n", e->v.str_label);
@@ -1308,89 +1836,94 @@ static void emit_expr_asm(FILE* out, const Expr* e, const Globals* globals, Code
     case EXPR_BOOL_LIT:
       fprintf(out, "  PUSHI %u\n", (unsigned)(e->v.int_u32 ? 1u : 0u));
       return;
-    case EXPR_IDENT: {
-      const Global* g = globals_find(globals, e->v.ident.name, e->v.ident.name_len);
-      if (!g) {
-        fprintf(stderr, "zmc: undefined identifier '%.*s'\n", (int)e->v.ident.name_len, e->v.ident.name);
-        exit(2);
+    case EXPR_IDENT:
+      if (e->v.ident.ref == REF_GLOBAL) {
+        fprintf(out, "  PUSHI %s\n", e->v.ident.data_label);
+        fprintf(out, "  LOAD32\n");
+      } else {
+        fprintf(out, "  LDFP %d\n", e->v.ident.slot);
       }
-      fprintf(out, "  PUSHI %s\n", g->data_label);
-      fprintf(out, "  LOAD32\n");
       return;
-    }
+    case EXPR_CALL:
+      if (!e->v.call.fn) die("internal: call expr missing resolved function");
+      for (size_t i = 0; i < e->v.call.argc; i++) {
+        emit_expr_asm(out, e->v.call.args[i], cg);
+      }
+      fprintf(out, "  CALL %s\n", e->v.call.fn->label);
+      return;
     case EXPR_NEG:
-      emit_expr_asm(out, e->v.unary.inner, globals, cg);
+      emit_expr_asm(out, e->v.unary.inner, cg);
       fprintf(out, "  NEG\n");
       return;
     case EXPR_LNOT:
-      emit_expr_asm(out, e->v.unary.inner, globals, cg);
+      emit_expr_asm(out, e->v.unary.inner, cg);
       emit_to_bool(out, e->v.unary.inner->ty);
       fprintf(out, "  PUSHI 0\n");
       fprintf(out, "  EQ\n");
       return;
     case EXPR_TEXT:
-      emit_expr_asm(out, e->v.unary.inner, globals, cg);
+      emit_expr_asm(out, e->v.unary.inner, cg);
       fprintf(out, "  SYSCALL 8\n");
       return;
     case EXPR_NUMBER:
-      emit_expr_asm(out, e->v.unary.inner, globals, cg);
+      emit_expr_asm(out, e->v.unary.inner, cg);
       fprintf(out, "  SYSCALL 9\n");
       return;
     case EXPR_ADD:
-      emit_expr_asm(out, e->v.bin.left, globals, cg);
-      emit_expr_asm(out, e->v.bin.right, globals, cg);
+      emit_expr_asm(out, e->v.bin.left, cg);
+      emit_expr_asm(out, e->v.bin.right, cg);
       if (e->ty == TY_STRING) fprintf(out, "  CALL __zman_strcat\n");
       else fprintf(out, "  ADD\n");
       return;
     case EXPR_SUB:
-      emit_expr_asm(out, e->v.bin.left, globals, cg);
-      emit_expr_asm(out, e->v.bin.right, globals, cg);
+      emit_expr_asm(out, e->v.bin.left, cg);
+      emit_expr_asm(out, e->v.bin.right, cg);
       fprintf(out, "  SUB\n");
       return;
     case EXPR_MUL:
-      emit_expr_asm(out, e->v.bin.left, globals, cg);
-      emit_expr_asm(out, e->v.bin.right, globals, cg);
+      emit_expr_asm(out, e->v.bin.left, cg);
+      emit_expr_asm(out, e->v.bin.right, cg);
       fprintf(out, "  MUL\n");
       return;
     case EXPR_DIVS:
-      emit_expr_asm(out, e->v.bin.left, globals, cg);
-      emit_expr_asm(out, e->v.bin.right, globals, cg);
+      emit_expr_asm(out, e->v.bin.left, cg);
+      emit_expr_asm(out, e->v.bin.right, cg);
       fprintf(out, "  DIVS\n");
       return;
     case EXPR_MODS:
-      emit_expr_asm(out, e->v.bin.left, globals, cg);
-      emit_expr_asm(out, e->v.bin.right, globals, cg);
+      emit_expr_asm(out, e->v.bin.left, cg);
+      emit_expr_asm(out, e->v.bin.right, cg);
       fprintf(out, "  MODS\n");
       return;
 
     case EXPR_LT:
-      emit_expr_asm(out, e->v.bin.left, globals, cg);
-      emit_expr_asm(out, e->v.bin.right, globals, cg);
+      emit_expr_asm(out, e->v.bin.left, cg);
+      emit_expr_asm(out, e->v.bin.right, cg);
       fprintf(out, "  LT\n");
       return;
     case EXPR_GT:
-      emit_expr_asm(out, e->v.bin.left, globals, cg);
-      emit_expr_asm(out, e->v.bin.right, globals, cg);
+      emit_expr_asm(out, e->v.bin.left, cg);
+      emit_expr_asm(out, e->v.bin.right, cg);
       fprintf(out, "  GT\n");
       return;
     case EXPR_LE:
-      emit_expr_asm(out, e->v.bin.left, globals, cg);
-      emit_expr_asm(out, e->v.bin.right, globals, cg);
+      emit_expr_asm(out, e->v.bin.left, cg);
+      emit_expr_asm(out, e->v.bin.right, cg);
       fprintf(out, "  LE\n");
       return;
     case EXPR_GE:
-      emit_expr_asm(out, e->v.bin.left, globals, cg);
-      emit_expr_asm(out, e->v.bin.right, globals, cg);
+      emit_expr_asm(out, e->v.bin.left, cg);
+      emit_expr_asm(out, e->v.bin.right, cg);
       fprintf(out, "  GE\n");
       return;
     case EXPR_EQ:
-      emit_expr_asm(out, e->v.bin.left, globals, cg);
-      emit_expr_asm(out, e->v.bin.right, globals, cg);
+      emit_expr_asm(out, e->v.bin.left, cg);
+      emit_expr_asm(out, e->v.bin.right, cg);
       fprintf(out, "  EQ\n");
       return;
     case EXPR_NE:
-      emit_expr_asm(out, e->v.bin.left, globals, cg);
-      emit_expr_asm(out, e->v.bin.right, globals, cg);
+      emit_expr_asm(out, e->v.bin.left, cg);
+      emit_expr_asm(out, e->v.bin.right, cg);
       // logical not of EQ result: (eq == 0)
       fprintf(out, "  EQ\n");
       fprintf(out, "  PUSHI 0\n");
@@ -1400,12 +1933,12 @@ static void emit_expr_asm(FILE* out, const Expr* e, const Globals* globals, Code
       uint32_t id = cg->next_label_id++;
       char end_lbl[64];
       snprintf(end_lbl, sizeof(end_lbl), "L_and_%u_end", (unsigned)id);
-      emit_expr_asm(out, e->v.bin.left, globals, cg);
+      emit_expr_asm(out, e->v.bin.left, cg);
       emit_to_bool(out, e->v.bin.left->ty);
       fprintf(out, "  DUP\n");
       fprintf(out, "  JZ %s\n", end_lbl);
       fprintf(out, "  POP\n");
-      emit_expr_asm(out, e->v.bin.right, globals, cg);
+      emit_expr_asm(out, e->v.bin.right, cg);
       emit_to_bool(out, e->v.bin.right->ty);
       fprintf(out, "%s:\n", end_lbl);
       return;
@@ -1414,12 +1947,12 @@ static void emit_expr_asm(FILE* out, const Expr* e, const Globals* globals, Code
       uint32_t id = cg->next_label_id++;
       char end_lbl[64];
       snprintf(end_lbl, sizeof(end_lbl), "L_or_%u_end", (unsigned)id);
-      emit_expr_asm(out, e->v.bin.left, globals, cg);
+      emit_expr_asm(out, e->v.bin.left, cg);
       emit_to_bool(out, e->v.bin.left->ty);
       fprintf(out, "  DUP\n");
       fprintf(out, "  JNZ %s\n", end_lbl);
       fprintf(out, "  POP\n");
-      emit_expr_asm(out, e->v.bin.right, globals, cg);
+      emit_expr_asm(out, e->v.bin.right, cg);
       emit_to_bool(out, e->v.bin.right->ty);
       fprintf(out, "%s:\n", end_lbl);
       return;
@@ -1427,37 +1960,52 @@ static void emit_expr_asm(FILE* out, const Expr* e, const Globals* globals, Code
   }
 }
 
-static void emit_stmt_list_asm(FILE* out, const StmtList* list, const Globals* globals, CodeGen* cg);
+static void emit_stmt_list_asm(FILE* out, const StmtList* list, const Function* cur_fn, CodeGen* cg);
 
-static void emit_stmt_asm(FILE* out, const Stmt* st, const Globals* globals, CodeGen* cg) {
+static void emit_stmt_asm(FILE* out, const Stmt* st, const Function* cur_fn, CodeGen* cg) {
   switch (st->kind) {
     case STMT_LET:
     case STMT_CONST: {
-      const Global* g = globals_find(globals, st->v.bind.name, st->v.bind.name_len);
-      if (!g) die("internal: missing global for binding");
-      fprintf(out, "  PUSHI %s\n", g->data_label);
-      emit_expr_asm(out, st->v.bind.value, globals, cg);
-      fprintf(out, "  STORE32\n");
+      if (st->v.bind.ref == REF_GLOBAL) {
+        fprintf(out, "  PUSHI %s\n", st->v.bind.data_label);
+        emit_expr_asm(out, st->v.bind.value, cg);
+        fprintf(out, "  STORE32\n");
+      } else {
+        emit_expr_asm(out, st->v.bind.value, cg);
+        fprintf(out, "  STFP %d\n", st->v.bind.slot);
+      }
       return;
     }
     case STMT_ASSIGN: {
-      const Global* g = globals_find(globals, st->v.assign.name, st->v.assign.name_len);
-      if (!g) die("internal: missing global for assignment");
-      fprintf(out, "  PUSHI %s\n", g->data_label);
-      emit_expr_asm(out, st->v.assign.value, globals, cg);
-      fprintf(out, "  STORE32\n");
+      if (st->v.assign.ref == REF_GLOBAL) {
+        fprintf(out, "  PUSHI %s\n", st->v.assign.data_label);
+        emit_expr_asm(out, st->v.assign.value, cg);
+        fprintf(out, "  STORE32\n");
+      } else {
+        emit_expr_asm(out, st->v.assign.value, cg);
+        fprintf(out, "  STFP %d\n", st->v.assign.slot);
+      }
       return;
     }
     case STMT_PRINT:
-      emit_expr_asm(out, st->v.print.value, globals, cg);
+      emit_expr_asm(out, st->v.print.value, cg);
       if (st->v.print.value->ty == TY_I32) {
         fprintf(out, "  SYSCALL 8\n");
       }
       fprintf(out, "  CALL __zman_print\n");
       fprintf(out, "  POP\n");
       return;
+    case STMT_RETURN:
+      if (!cur_fn) die("internal: return outside function");
+      emit_expr_asm(out, st->v.ret.value, cg);
+      fprintf(out, "  RET %zu\n", cur_fn->argc);
+      return;
+    case STMT_EXPR:
+      emit_expr_asm(out, st->v.expr.value, cg);
+      fprintf(out, "  POP\n");
+      return;
     case STMT_BLOCK:
-      emit_stmt_list_asm(out, st->v.block.body, globals, cg);
+      emit_stmt_list_asm(out, st->v.block.body, cur_fn, cg);
       return;
     case STMT_IF: {
       uint32_t id = cg->next_label_id++;
@@ -1466,14 +2014,14 @@ static void emit_stmt_asm(FILE* out, const Stmt* st, const Globals* globals, Cod
       snprintf(else_lbl, sizeof(else_lbl), "L_if_%u_else", (unsigned)id);
       snprintf(end_lbl, sizeof(end_lbl), "L_if_%u_end", (unsigned)id);
 
-      emit_expr_asm(out, st->v.if_.cond, globals, cg);
+      emit_expr_asm(out, st->v.if_.cond, cg);
       emit_to_bool(out, st->v.if_.cond->ty);
       fprintf(out, "  JZ %s\n", st->v.if_.else_body ? else_lbl : end_lbl);
-      emit_stmt_list_asm(out, st->v.if_.then_body, globals, cg);
+      emit_stmt_list_asm(out, st->v.if_.then_body, cur_fn, cg);
       if (st->v.if_.else_body) {
         fprintf(out, "  JMP %s\n", end_lbl);
         fprintf(out, "%s:\n", else_lbl);
-        emit_stmt_list_asm(out, st->v.if_.else_body, globals, cg);
+        emit_stmt_list_asm(out, st->v.if_.else_body, cur_fn, cg);
       }
       fprintf(out, "%s:\n", end_lbl);
       return;
@@ -1485,10 +2033,10 @@ static void emit_stmt_asm(FILE* out, const Stmt* st, const Globals* globals, Cod
       snprintf(head_lbl, sizeof(head_lbl), "L_while_%u_head", (unsigned)id);
       snprintf(end_lbl, sizeof(end_lbl), "L_while_%u_end", (unsigned)id);
       fprintf(out, "%s:\n", head_lbl);
-      emit_expr_asm(out, st->v.while_.cond, globals, cg);
+      emit_expr_asm(out, st->v.while_.cond, cg);
       emit_to_bool(out, st->v.while_.cond->ty);
       fprintf(out, "  JZ %s\n", end_lbl);
-      emit_stmt_list_asm(out, st->v.while_.body, globals, cg);
+      emit_stmt_list_asm(out, st->v.while_.body, cur_fn, cg);
       fprintf(out, "  JMP %s\n", head_lbl);
       fprintf(out, "%s:\n", end_lbl);
       return;
@@ -1496,13 +2044,22 @@ static void emit_stmt_asm(FILE* out, const Stmt* st, const Globals* globals, Cod
   }
 }
 
-static void emit_stmt_list_asm(FILE* out, const StmtList* list, const Globals* globals, CodeGen* cg) {
+static void emit_stmt_list_asm(FILE* out, const StmtList* list, const Function* cur_fn, CodeGen* cg) {
   for (size_t i = 0; i < list->len; i++) {
-    emit_stmt_asm(out, &list->items[i], globals, cg);
+    emit_stmt_asm(out, &list->items[i], cur_fn, cg);
   }
 }
 
-static void emit_v0_asm(FILE* out, const StmtList* stmts, const StrPool* sp, const Globals* globals) {
+static void emit_function_asm(FILE* out, const Function* fn, CodeGen* cg) {
+  fprintf(out, "%s:\n", fn->label);
+  fprintf(out, "  ENTER %d\n", fn->nlocals);
+  emit_stmt_list_asm(out, fn->body, fn, cg);
+  // Should be unreachable (parser enforces at least one return), but keep a
+  // hard runtime failure in case control falls off the end.
+  fprintf(out, "  TRAP 1\n");
+}
+
+static void emit_v0_asm(FILE* out, const StmtList* stmts, const StrPool* sp, const Globals* globals, const FuncTable* funcs) {
   fprintf(out, ".module \"zman_program\"\n\n");
   fprintf(out, ".code\n");
   fprintf(out, ".entry main\n\n");
@@ -1574,10 +2131,17 @@ static void emit_v0_asm(FILE* out, const StmtList* stmts, const StrPool* sp, con
   fprintf(out, "  LDFP 3\n");
   fprintf(out, "  RET 2\n\n");
 
-  fprintf(out, "main:\n");
   CodeGen cg;
   cg.next_label_id = 0;
-  emit_stmt_list_asm(out, stmts, globals, &cg);
+
+  // user functions
+  for (size_t i = 0; i < funcs->len; i++) {
+    emit_function_asm(out, &funcs->items[i], &cg);
+    fprintf(out, "\n");
+  }
+
+  fprintf(out, "main:\n");
+  emit_stmt_list_asm(out, stmts, NULL, &cg);
   fprintf(out, "  HALT\n\n");
 
   fprintf(out, ".data\n");
@@ -1617,6 +2181,8 @@ static void usage(FILE* out) {
           "  - print(<string-expr>);\n"
           "  - if (<expr>) { ... } else { ... }\n"
           "  - while (<expr>) { ... }\n"
+          "  - func <name>(<params...>) { ... }\n"
+          "  - return <expr>;\n"
           "  - expressions: string literals, integer literals, identifiers, parentheses\n"
           "    - string: + (concatenation), text(<int-expr>)\n"
           "    - int: + - * / %% and unary -, number(<string-expr>)\n"
@@ -1645,9 +2211,16 @@ int main(int argc, char** argv) {
   Globals globals;
   globals_init(&globals);
 
+  FuncTable funcs;
+  ft_init(&funcs);
+
   StmtList* stmts = stmt_list_new();
 
-  parse_program(&p, &sp, &globals, stmts);
+  ParseCtx ctx;
+  ctx.globals = &globals;
+  ctx.funcs = &funcs;
+  ctx.cur_fn = NULL;
+  parse_program(&p, &sp, &ctx, stmts);
   token_free(&p.cur);
 
   FILE* out = fopen(out_path, "wb");
@@ -1656,10 +2229,11 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  emit_v0_asm(out, stmts, &sp, &globals);
+  emit_v0_asm(out, stmts, &sp, &globals, &funcs);
   fclose(out);
 
   stmt_list_free(stmts);
+  ft_free(&funcs);
   globals_free(&globals);
   sp_free(&sp);
   free(src);

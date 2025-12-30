@@ -96,6 +96,12 @@ Types are inferred. The optional `[]` suffix on a binding name (for example `fun
 
 ## Syntax (EBNF)
 
+Note: The v0 reference compiler (`zmc`) currently implements only a subset of this grammar:
+
+- `func_def` is supported, but `func_body` must be a `block` (the `:= expr ;` shorthand is not implemented yet).
+- `expr_stmt` is supported.
+- Arrays, indexing (`a[i]`), and `foreach` are not implemented yet.
+
 ```
 program        := { top_item } EOF
 top_item       := func_def | statement

@@ -74,3 +74,4 @@ run_one_zmc concat
 run_one_zmc ints
 run_one_zmc control
 run_one_zmc logical
+run_one_zmc functions
