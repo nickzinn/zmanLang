@@ -113,7 +113,13 @@ static const Instr* find_instr(uint8_t opcode) {
   return NULL;
 }
 
-static void die(const char* msg) {
+#if defined(__clang__) || defined(__GNUC__)
+#define NORETURN __attribute__((noreturn))
+#else
+#define NORETURN
+#endif
+
+static NORETURN void die(const char* msg) {
   fprintf(stderr, "error: %s\n", msg);
   exit(1);
 }

@@ -80,7 +80,13 @@ static void svm_asm_error_setf(const char* fmt, ...) {
   g_svm_asm_err_len = (uint32_t)n;
 }
 
-static void die(const char* msg) {
+#if defined(__clang__) || defined(__GNUC__)
+#define NORETURN __attribute__((noreturn))
+#else
+#define NORETURN
+#endif
+
+static NORETURN void die(const char* msg) {
   if (g_trap_errors) {
     if (g_cur_line > 0) svm_asm_error_setf("error: line %d: %s", g_cur_line, msg);
     else svm_asm_error_setf("error: %s", msg);
@@ -91,7 +97,7 @@ static void die(const char* msg) {
   exit(1);
 }
 
-static void die2(const char* msg, const char* detail) {
+static NORETURN void die2(const char* msg, const char* detail) {
   if (g_trap_errors) {
     if (g_cur_line > 0) svm_asm_error_setf("error: line %d: %s: %s", g_cur_line, msg, detail);
     else svm_asm_error_setf("error: %s: %s", msg, detail);
@@ -1057,12 +1063,15 @@ static char* read_entire_file(const char* path) {
   fseek(f, 0, SEEK_END);
   long n = ftell(f);
   if (n < 0) die("ftell failed");
+  if ((unsigned long)n > (unsigned long)(SIZE_MAX - 1)) die("input file too large");
   fseek(f, 0, SEEK_SET);
-  char* buf = (char*)xmalloc((size_t)n + 1);
-  size_t rd = fread(buf, 1, (size_t)n, f);
+  size_t sn = (size_t)n;
+  char* buf = (char*)malloc(sn + 1);
+  if (!buf) die("out of memory");
+  size_t rd = fread(buf, 1, sn, f);
   fclose(f);
-  if (rd != (size_t)n) die("read failed");
-  buf[n] = 0;
+  if (rd != sn) die("read failed");
+  buf[rd] = 0;
   return buf;
 }
 
@@ -1330,6 +1339,8 @@ int main(int argc, char** argv) {
   const char* inpath = argv[1];
   const char* outpath = argv[2];
 
+  int rc = 0;
+
   char* text = read_entire_file(inpath);
 
   Asm A;
@@ -1342,7 +1353,15 @@ int main(int argc, char** argv) {
   // Pass 2: re-parse to rebuild code/data identically (so offsets match),
   // while not adding new symbols/fixups (we only record those in pass1).
   // Easiest: reset code/data buffers and parse again with pass=2.
-  Buf code1 = A.code, data1 = A.data;
+  Buf code1;
+  Buf data1;
+  memset(&code1, 0, sizeof(code1));
+  memset(&data1, 0, sizeof(data1));
+  int have_pass1_blobs = 0;
+
+  code1 = A.code;
+  data1 = A.data;
+  have_pass1_blobs = 1;
   // We must discard the pass1 emitted blobs; rebuild clean for pass2.
   // Keep symbols+fixups from pass1, but reset blobs.
   A.code.data = NULL; A.code.len = A.code.cap = 0;
@@ -1363,20 +1382,23 @@ int main(int argc, char** argv) {
       int64_t v = (int64_t)base + (int64_t)A.entry_addend;
       if (v < 0 || v > 0xFFFFFFFFLL) {
         fprintf(stderr, "error: line %d: .entry out of u32 range\n", A.entry_line);
-        return 1;
+        rc = 1;
+        goto cleanup;
       }
       entry_ip = (uint32_t)v;
     } else {
       if (A.entry_imm < 0) {
         fprintf(stderr, "error: line %d: .entry cannot be negative\n", A.entry_line);
-        return 1;
+        rc = 1;
+        goto cleanup;
       }
       entry_ip = (uint32_t)A.entry_imm;
     }
     if (entry_ip > (uint32_t)A.code.len) {
       fprintf(stderr, "error: line %d: .entry out of range (0x%08X > code_size 0x%08X)\n",
               A.entry_line, entry_ip, (uint32_t)A.code.len);
-      return 1;
+      rc = 1;
+      goto cleanup;
     }
   }
 
@@ -1385,8 +1407,6 @@ int main(int argc, char** argv) {
     fprintf(stderr, "warning: pass1/pass2 size mismatch (code %zu/%zu, data %zu/%zu)\n",
             code1.len, A.code.len, data1.len, A.data.len);
   }
-  free(code1.data);
-  free(data1.data);
 
   uint32_t mem_total = (A.data.len < 65536u) ? 65536u : (uint32_t)A.data.len;
   if (A.mem_total_is_set) {
@@ -1395,11 +1415,13 @@ int main(int argc, char** argv) {
       Sym* s = symtab_find(&A.syms, A.mem_total_sym);
       if (!s) {
         fprintf(stderr, "error: line %d: undefined symbol in .memtotal: %s\n", A.mem_total_line, A.mem_total_sym);
-        return 1;
+        rc = 1;
+        goto cleanup;
       }
       if (s->kind != SYM_CONST) {
         fprintf(stderr, "error: line %d: .memtotal symbol '%s' must be a .const\n", A.mem_total_line, A.mem_total_sym);
-        return 1;
+        rc = 1;
+        goto cleanup;
       }
       v = (int64_t)s->value + (int64_t)A.mem_total_addend;
     } else {
@@ -1408,12 +1430,14 @@ int main(int argc, char** argv) {
 
     if (v <= 0 || v > 0xFFFFFFFFLL) {
       fprintf(stderr, "error: line %d: .memtotal out of u32 range\n", A.mem_total_line);
-      return 1;
+      rc = 1;
+      goto cleanup;
     }
     if ((uint64_t)v < (uint64_t)A.data.len) {
       fprintf(stderr, "error: line %d: .memtotal (%lld) must be >= mem_init_size (%zu)\n",
               A.mem_total_line, (long long)v, A.data.len);
-      return 1;
+      rc = 1;
+      goto cleanup;
     }
     mem_total = (uint32_t)v;
   }
@@ -1427,6 +1451,15 @@ int main(int argc, char** argv) {
   fprintf(stderr, "assembled: %s (code=%zu bytes, mem_init=%zu bytes, mem_total=%u)\n",
           outpath, A.code.len, A.data.len, mem_total);
 
+  rc = 0;
+  goto cleanup;
+
+cleanup:
+  if (have_pass1_blobs) {
+    free(code1.data);
+    free(data1.data);
+  }
+
   free(A.code.data);
   free(A.data.data);
 
@@ -1439,5 +1472,5 @@ int main(int argc, char** argv) {
   free(A.fixups.items);
 
   free(text);
-  return 0;
+  return rc;
 }

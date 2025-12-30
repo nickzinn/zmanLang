@@ -2,7 +2,7 @@
 
 // Purpose: Small shared utilities for zmc (error handling, allocation helpers, byte buffer, file IO).
 
-void die(const char* msg) {
+ZMC_NORETURN void die(const char* msg) {
   fprintf(stderr, "zmc: %s\n", msg);
   exit(2);
 }
@@ -61,19 +61,24 @@ char* read_entire_file(const char* path, size_t* out_len) {
     fprintf(stderr, "zmc: ftell failed for '%s'\n", path);
     exit(2);
   }
+  if ((unsigned long)end > (unsigned long)(SIZE_MAX - 1)) {
+    fprintf(stderr, "zmc: file too large '%s'\n", path);
+    exit(2);
+  }
   if (fseek(f, 0, SEEK_SET) != 0) {
     fprintf(stderr, "zmc: fseek failed for '%s'\n", path);
     exit(2);
   }
 
   size_t n = (size_t)end;
-  char* buf = (char*)xmalloc(n + 1);
+  char* buf = (char*)malloc(n + 1);
+  if (!buf) die("out of memory");
   size_t got = fread(buf, 1, n, f);
   if (got != n) {
     fprintf(stderr, "zmc: failed to read '%s'\n", path);
     exit(2);
   }
-  buf[n] = '\0';
+  buf[got] = '\0';
   fclose(f);
 
   if (out_len) *out_len = n;

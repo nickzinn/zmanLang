@@ -76,6 +76,7 @@ static bool emit_bytes_as_ascii(FILE* out, const uint8_t* bytes, size_t n) {
 }
 
 static void emit_expr_asm(FILE* out, const Expr* e, CodeGen* cg) {
+  if (!e) die("internal: null expression");
   switch (e->kind) {
     case EXPR_STR_LIT:
       fprintf(out, "  PUSHI %s\n", e->v.str_label);

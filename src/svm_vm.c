@@ -91,7 +91,13 @@ typedef struct {
 
 // ------------------------------ Helpers ------------------------------
 
-static void die(const char* msg) {
+#if defined(__clang__) || defined(__GNUC__)
+#define NORETURN __attribute__((noreturn))
+#else
+#define NORETURN
+#endif
+
+static NORETURN void die(const char* msg) {
   fprintf(stderr, "error: %s\n", msg);
   exit(1);
 }
@@ -223,15 +229,35 @@ static int vm_verify_code(const uint8_t* code,
     return 0;
   }
 
-  uint32_t bits_len = (code_size + 7u) / 8u;
-  uint8_t* starts = (uint8_t*)calloc(bits_len ? (size_t)bits_len : 1u, 1);
+  const size_t bits_len = ((size_t)code_size + 7u) / 8u;
+  if (bits_len == 0) {
+    if (out_err) *out_err = "internal: invalid starts bitmap size";
+    return 0;
+  }
+  uint8_t* starts = (uint8_t*)calloc(bits_len ? bits_len : 1u, 1);
   if (!starts) {
     if (out_err) *out_err = "out of memory (verify starts)";
     return 0;
   }
 
-  // Worst-case allocation: very small code, or degenerate input.
-  uint32_t* targets = (uint32_t*)xmalloc((size_t)code_size * sizeof(uint32_t));
+  // Worst-case allocation: one potential static target per byte of code.
+  if ((size_t)code_size > (SIZE_MAX / sizeof(uint32_t))) {
+    if (out_err) *out_err = "code too large (verify targets)";
+    free(starts);
+    return 0;
+  }
+  const size_t targets_cap = (size_t)code_size;
+  if (targets_cap == 0) {
+    if (out_err) *out_err = "internal: invalid targets capacity";
+    free(starts);
+    return 0;
+  }
+  uint32_t* targets = (uint32_t*)malloc(targets_cap * sizeof(uint32_t));
+  if (!targets) {
+    if (out_err) *out_err = "out of memory (verify targets)";
+    free(starts);
+    return 0;
+  }
   uint32_t tcount = 0;
 
 #define SET_START(_ip) do { starts[(_ip) >> 3] = (uint8_t)(starts[(_ip) >> 3] | (uint8_t)(1u << ((_ip) & 7u))); } while (0)
@@ -240,6 +266,10 @@ static int vm_verify_code(const uint8_t* code,
   const char* err = NULL;
   uint32_t ip = 0;
   while (ip < code_size) {
+    if (((size_t)ip >> 3) >= bits_len) {
+      err = "internal: starts bitmap OOB";
+      goto fail;
+    }
     SET_START(ip);
     uint8_t op = code[ip++];
     uint32_t imm = 0;
@@ -309,6 +339,10 @@ static int vm_verify_code(const uint8_t* code,
     if (imm == 4u) {
       if (op == 0x04 || op == 0x05 || op == 0x06 || op == 0x0E || op == 0x2F) {
         uint32_t target = read_u32_le(code + ip);
+        if ((size_t)tcount >= targets_cap) {
+          err = "internal: too many targets";
+          goto fail;
+        }
         targets[tcount++] = target;
       }
     }
@@ -334,8 +368,13 @@ static int vm_verify_code(const uint8_t* code,
   }
 
   free(targets);
-  if (out_starts) *out_starts = starts;
-  if (out_starts_len) *out_starts_len = bits_len;
+  if (out_starts) {
+    *out_starts = starts;
+    starts = NULL; // ownership transferred
+  } else {
+    free(starts);
+  }
+  if (out_starts_len) *out_starts_len = (uint32_t)bits_len;
   return 1;
 
 fail:
@@ -660,13 +699,6 @@ static inline __attribute__((always_inline)) void step(VM* vm) {
       ip = vm->ip;
       sp = vm->sp;
       fp = vm->fp;
-      // Fast-path reload of pointers in case VM was reinitialized (shouldn't happen here).
-      code = vm->code;
-      code_size = vm->code_size;
-      mem = vm->mem;
-      mem_size = vm->mem_size;
-      stack = vm->stack;
-      stack_cap = vm->stack_cap;
       break;
     }
 
@@ -1165,18 +1197,34 @@ static int vm_init_from_container(VM* vm,
   if (!vm) return 0;
   memset(vm, 0, sizeof(*vm));
 
-  ZvmHeader H;
-  if (!read_zvm_header(container, container_len, &H)) return 0;
-
-  const size_t need = 28ull + (size_t)H.code_size + (size_t)H.mem_init_size;
-  if (need > container_len) return 0;
-  if (H.mem_total_size < H.mem_init_size) return 0;
-  if (H.entry_ip > H.code_size) return 0;
-  if (stack_words == 0) return 0;
-
+  // Record container + ownership immediately so failures are cleaned up uniformly.
   vm->container = container;
   vm->container_len = container_len;
   vm->owns_container = owns_container;
+
+  ZvmHeader H;
+  if (!read_zvm_header(container, container_len, &H)) {
+    vm_free(vm);
+    return 0;
+  }
+
+  const size_t need = 28ull + (size_t)H.code_size + (size_t)H.mem_init_size;
+  if (need > container_len) {
+    vm_free(vm);
+    return 0;
+  }
+  if (H.mem_total_size < H.mem_init_size) {
+    vm_free(vm);
+    return 0;
+  }
+  if (H.entry_ip > H.code_size) {
+    vm_free(vm);
+    return 0;
+  }
+  if (stack_words == 0) {
+    vm_free(vm);
+    return 0;
+  }
 
   // Avoid copying code: point into the container blob.
   vm->code = container + 28;
@@ -1301,7 +1349,7 @@ int main(int argc, char** argv) {
   uint8_t* file = read_file(path, &file_len);
 
   VM vm;
-  if (!vm_init_from_container(&vm, file, file_len, 1, stack_words)) {
+  if (!vm_init_from_container(&vm, file, file_len, 0, stack_words)) {
     fprintf(stderr, "error: invalid or truncated ZVM1 file: %s\n", path);
     free(file);
     return 1;
@@ -1316,10 +1364,12 @@ int main(int argc, char** argv) {
   if (vm.trap_msg && strcmp(vm.trap_msg, "halt") != 0 && strcmp(vm.trap_msg, "exit") != 0) {
     fprintf(stderr, "\nVM TRAP: code=0x%08X ip=0x%08X (%s)\n", vm.trap_code, vm.ip, vm.trap_msg);
     vm_free(&vm);
+    free(file);
     return 1;
   }
 
   uint32_t rc = (vm.trap_msg && strcmp(vm.trap_msg, "exit") == 0) ? vm.trap_code : 0;
   vm_free(&vm);
+  free(file);
   return (int)(rc & 0xFFu);
 }

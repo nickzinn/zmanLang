@@ -14,13 +14,19 @@
 
 // ------------------------------ Utilities ------------------------------
 
+#if defined(__clang__) || defined(__GNUC__)
+#define ZMC_NORETURN __attribute__((noreturn))
+#else
+#define ZMC_NORETURN
+#endif
+
 typedef struct {
   uint8_t* data;
   size_t len;
   size_t cap;
 } ByteBuf;
 
-void die(const char* msg);
+ZMC_NORETURN void die(const char* msg);
 void* xmalloc(size_t n);
 void* xrealloc(void* p, size_t n);
 
@@ -129,6 +135,7 @@ const Global* globals_find(const Globals* g, const char* name, size_t name_len);
 Global* globals_add(Globals* g, const char* name, size_t name_len, bool is_const);
 
 typedef enum {
+  TY_INVALID = 0,
   TY_STRING = 1,
   TY_I32 = 2,
   TY_BOOL = 3,
