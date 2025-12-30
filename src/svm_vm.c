@@ -21,6 +21,8 @@ Syscalls (SYSCALL u8):
   5: read(ptr,len)          stack: ptr len -> n (reads into linear memory from stdin, returns n)
   6: heap_alloc(nbytes)      stack: nbytes -> ptr (4-byte aligned bump alloc; traps on OOM)
   7: heap_ptr()              stack: -> ptr       (current bump pointer)
+  8: text_i32(x)             stack: x -> p        (allocates a ZManLang string object for the decimal text of i32)
+  9: number(p)               stack: p -> x        (parses a ZManLang string object as i32, traps on invalid/overflow)
 
 TRAP u16:
   Halts with trap code (u16).
@@ -412,6 +414,30 @@ static uint32_t mask_shift(uint32_t s) { return s & 31u; }
 
 static uint32_t align4_u32(uint32_t n) { return (n + 3u) & ~3u; }
 
+static int heap_alloc_bytes(VM* vm, uint32_t nbytes, uint32_t* out_ptr) {
+  uint32_t size = align4_u32(nbytes);
+  uint32_t base = vm->heap_ptr;
+  // overflow-safe OOM check
+  if (base > vm->mem_size || size > vm->mem_size || base + size < base || base + size > vm->mem_size) {
+    trap(vm, 0xFFFF0200u, "heap out of memory");
+    return 0;
+  }
+  vm->heap_ptr = base + size;
+  *out_ptr = base;
+  return 1;
+}
+
+static uint32_t load_u32_le(const uint8_t* p) {
+  return ((uint32_t)p[0]) | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void store_u32_le(uint8_t* p, uint32_t v) {
+  p[0] = (uint8_t)(v & 0xFFu);
+  p[1] = (uint8_t)((v >> 8) & 0xFFu);
+  p[2] = (uint8_t)((v >> 16) & 0xFFu);
+  p[3] = (uint8_t)((v >> 24) & 0xFFu);
+}
+
 // ------------------------------ Syscalls ------------------------------
 
 static void do_syscall(VM* vm, uint8_t id) {
@@ -488,14 +514,8 @@ static void do_syscall(VM* vm, uint8_t id) {
       // 4-byte aligned bump allocator; traps on OOM.
       if (!check_stack_pop(vm, 1)) return;
       uint32_t nbytes = pop(vm);
-      uint32_t size = align4_u32(nbytes);
-      uint32_t base = vm->heap_ptr;
-      // overflow-safe OOM check
-      if (base > vm->mem_size || size > vm->mem_size || base + size < base || base + size > vm->mem_size) {
-        trap(vm, 0xFFFF0200u, "heap out of memory");
-        return;
-      }
-      vm->heap_ptr = base + size;
+      uint32_t base = 0;
+      if (!heap_alloc_bytes(vm, nbytes, &base)) return;
       if (!check_stack_push(vm, 1)) return;
       push(vm, base);
       return;
@@ -506,6 +526,75 @@ static void do_syscall(VM* vm, uint8_t id) {
       push(vm, vm->heap_ptr);
       return;
     }
+
+    case 8: { // text_i32(x) -> p (ZManLang string object: [u32 len][bytes...])
+      if (!check_stack_pop(vm, 1)) return;
+      int32_t x = (int32_t)pop(vm);
+
+      // Convert to decimal ASCII in a small temp buffer.
+      char rev[16];
+      int rlen = 0;
+      int neg = (x < 0);
+      uint32_t mag = (uint32_t)((x < 0) ? -(int64_t)x : (int64_t)x);
+      do {
+        uint32_t digit = mag % 10u;
+        rev[rlen++] = (char)('0' + (char)digit);
+        mag /= 10u;
+      } while (mag != 0u);
+      if (neg) rev[rlen++] = '-';
+
+      uint32_t len = (uint32_t)rlen;
+      uint32_t ptr = 0;
+      if (!heap_alloc_bytes(vm, 4u + len, &ptr)) return;
+      if (!mem_range_ok(vm, ptr, 4u + len)) { trap(vm, 0xFFFF0310u, "text_i32 OOB"); return; }
+
+      store_u32_le(vm->mem + ptr, len);
+      for (uint32_t i = 0; i < len; i++) {
+        vm->mem[ptr + 4u + i] = (uint8_t)rev[(size_t)(rlen - 1 - (int)i)];
+      }
+
+      if (!check_stack_push(vm, 1)) return;
+      push(vm, ptr);
+      return;
+    }
+
+    case 9: { // number(p) -> x (parse ZManLang string object)
+      if (!check_stack_pop(vm, 1)) return;
+      uint32_t ptr = pop(vm);
+      if (!mem_range_ok(vm, ptr, 4u)) { trap(vm, 0xFFFF0320u, "number OOB header"); return; }
+      uint32_t len = load_u32_le(vm->mem + ptr);
+      if (!mem_range_ok(vm, ptr + 4u, len)) { trap(vm, 0xFFFF0321u, "number OOB bytes"); return; }
+
+      const uint8_t* s = vm->mem + ptr + 4u;
+      // Spec behavior: optional leading sign, then digits; stop at first non-digit.
+      // Returns 0 if there are no digits. Traps only on overflow.
+      uint32_t i = 0;
+      int sign = 1;
+      if (len > 0u && s[0] == (uint8_t)'+') { i = 1; }
+      else if (len > 0u && s[0] == (uint8_t)'-') { sign = -1; i = 1; }
+
+      int saw_digit = 0;
+      int64_t acc = 0;
+      for (; i < len; i++) {
+        uint8_t ch = s[i];
+        if (ch < (uint8_t)'0' || ch > (uint8_t)'9') break;
+        saw_digit = 1;
+        acc = acc * 10 + (int64_t)(ch - (uint8_t)'0');
+
+        if (sign > 0) {
+          if (acc > 2147483647LL) { trap(vm, 0xFFFF0325u, "number overflow"); return; }
+        } else {
+          if (acc > 2147483648LL) { trap(vm, 0xFFFF0325u, "number overflow"); return; }
+        }
+      }
+
+      int32_t out = 0;
+      if (saw_digit) out = (sign > 0) ? (int32_t)acc : (int32_t)(-acc);
+      if (!check_stack_push(vm, 1)) return;
+      push(vm, (uint32_t)out);
+      return;
+    }
+
     default:
       trap(vm, 0xFFFF00FFu, "unknown syscall id");
       return;

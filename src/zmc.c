@@ -113,10 +113,15 @@ typedef enum {
   TOK_CONST,
   TOK_ASSIGN, // :=
   TOK_PLUS,
+  TOK_MINUS,
+  TOK_STAR,
+  TOK_SLASH,
+  TOK_PERCENT,
   TOK_LPAREN,
   TOK_RPAREN,
   TOK_SEMI,
   TOK_STRING,
+  TOK_INT,
 } TokKind;
 
 typedef struct {
@@ -125,6 +130,8 @@ typedef struct {
   size_t len;
   // for TOK_STRING
   ByteBuf str_bytes;
+  // for TOK_INT
+  uint32_t int_u32;
 } Token;
 
 typedef struct {
@@ -189,6 +196,26 @@ static Token next_token(Lexer* lx) {
 
   char c = lx->src[lx->i];
 
+  if (c >= '0' && c <= '9') {
+    size_t start = lx->i;
+    uint64_t v = 0;
+    while (lx->i < lx->len) {
+      char d = lx->src[lx->i];
+      if (d < '0' || d > '9') break;
+      v = v * 10u + (uint64_t)(d - '0');
+      if (v > 0xFFFFFFFFu) {
+        fprintf(stderr, "zmc: integer literal too large at byte %zu\n", start);
+        exit(2);
+      }
+      lx->i++;
+    }
+    t.kind = TOK_INT;
+    t.pos = start;
+    t.len = lx->i - start;
+    t.int_u32 = (uint32_t)v;
+    return t;
+  }
+
   if (is_alpha_(c)) {
     size_t start = lx->i;
     lx->i++;
@@ -214,6 +241,34 @@ static Token next_token(Lexer* lx) {
   if (c == '+') {
     lx->i++;
     t.kind = TOK_PLUS;
+    t.len = 1;
+    return t;
+  }
+
+  if (c == '-') {
+    lx->i++;
+    t.kind = TOK_MINUS;
+    t.len = 1;
+    return t;
+  }
+
+  if (c == '*') {
+    lx->i++;
+    t.kind = TOK_STAR;
+    t.len = 1;
+    return t;
+  }
+
+  if (c == '/') {
+    lx->i++;
+    t.kind = TOK_SLASH;
+    t.len = 1;
+    return t;
+  }
+
+  if (c == '%') {
+    lx->i++;
+    t.kind = TOK_PERCENT;
     t.len = 1;
     return t;
   }
@@ -333,6 +388,7 @@ typedef struct {
   char* name;
   char* data_label;
   bool is_const;
+  int ty; // Type
 } Global;
 
 typedef struct {
@@ -395,19 +451,47 @@ static Global* globals_add(Globals* g, const char* name, size_t name_len, bool i
 }
 
 typedef enum {
+  TY_STRING = 1,
+  TY_I32 = 2,
+} Type;
+
+static const char* type_name(Type t) {
+  switch (t) {
+    case TY_STRING: return "string";
+    case TY_I32: return "i32";
+    default: return "<unknown>";
+  }
+}
+
+static void globals_set_type(Global* g, Type ty) {
+  g->ty = (int)ty;
+}
+
+typedef enum {
   EXPR_STR_LIT,
+  EXPR_INT_LIT,
   EXPR_IDENT,
   EXPR_ADD,
+  EXPR_SUB,
+  EXPR_MUL,
+  EXPR_DIVS,
+  EXPR_MODS,
+  EXPR_NEG,
+  EXPR_TEXT,
+  EXPR_NUMBER,
 } ExprKind;
 
 typedef struct Expr Expr;
 struct Expr {
   ExprKind kind;
   size_t pos;
+  Type ty;
   union {
     const char* str_label; // EXPR_STR_LIT
+    uint32_t int_u32; // EXPR_INT_LIT
     struct { const char* name; size_t name_len; } ident; // EXPR_IDENT
-    struct { Expr* left; Expr* right; } add; // EXPR_ADD
+    struct { Expr* left; Expr* right; } bin; // EXPR_ADD/EXPR_SUB/EXPR_MUL/EXPR_DIVS/EXPR_MODS
+    struct { Expr* inner; } unary; // EXPR_NEG
   } v;
 };
 
@@ -416,14 +500,30 @@ static Expr* new_expr(ExprKind k, size_t pos) {
   memset(e, 0, sizeof(*e));
   e->kind = k;
   e->pos = pos;
+  e->ty = 0;
   return e;
 }
 
 static void free_expr(Expr* e) {
   if (!e) return;
-  if (e->kind == EXPR_ADD) {
-    free_expr(e->v.add.left);
-    free_expr(e->v.add.right);
+  switch (e->kind) {
+    case EXPR_ADD:
+    case EXPR_SUB:
+    case EXPR_MUL:
+    case EXPR_DIVS:
+    case EXPR_MODS:
+      free_expr(e->v.bin.left);
+      free_expr(e->v.bin.right);
+      break;
+    case EXPR_NEG:
+      free_expr(e->v.unary.inner);
+      break;
+    case EXPR_TEXT:
+    case EXPR_NUMBER:
+      free_expr(e->v.unary.inner);
+      break;
+    default:
+      break;
   }
   free(e);
 }
@@ -507,12 +607,58 @@ static bool ident_is(Parser* p, const char* s) {
   return memcmp(p->src + p->cur.pos, s, n) == 0;
 }
 
-static Expr* parse_expr(Parser* p, StrPool* sp);
+static Expr* parse_expr(Parser* p, StrPool* sp, const Globals* globals);
 
-static Expr* parse_primary(Parser* p, StrPool* sp) {
+static Type require_type(Type got, Type want, const char* ctx) {
+  if (got != want) {
+    fprintf(stderr, "zmc: type error (%s): expected %s, got %s\n", ctx, type_name(want), type_name(got));
+    exit(2);
+  }
+  return got;
+}
+
+static Expr* parse_primary(Parser* p, StrPool* sp, const Globals* globals) {
+  if (ident_is(p, "text")) {
+    size_t pos = p->cur.pos;
+    advance(p);
+    expect(p, TOK_LPAREN, "'('");
+    advance(p);
+    Expr* inner = parse_expr(p, sp, globals);
+    require_type(inner->ty, TY_I32, "text() argument");
+    expect(p, TOK_RPAREN, "')'");
+    advance(p);
+    Expr* e = new_expr(EXPR_TEXT, pos);
+    e->v.unary.inner = inner;
+    e->ty = TY_STRING;
+    return e;
+  }
+
+  if (ident_is(p, "number")) {
+    size_t pos = p->cur.pos;
+    advance(p);
+    expect(p, TOK_LPAREN, "'('");
+    advance(p);
+    Expr* inner = parse_expr(p, sp, globals);
+    require_type(inner->ty, TY_STRING, "number() argument");
+    expect(p, TOK_RPAREN, "')'");
+    advance(p);
+    Expr* e = new_expr(EXPR_NUMBER, pos);
+    e->v.unary.inner = inner;
+    e->ty = TY_I32;
+    return e;
+  }
+
   if (tok_is(p, TOK_STRING)) {
     Expr* e = new_expr(EXPR_STR_LIT, p->cur.pos);
     e->v.str_label = sp_add(sp, &p->cur.str_bytes);
+    e->ty = TY_STRING;
+    advance(p);
+    return e;
+  }
+  if (tok_is(p, TOK_INT)) {
+    Expr* e = new_expr(EXPR_INT_LIT, p->cur.pos);
+    e->v.int_u32 = p->cur.int_u32;
+    e->ty = TY_I32;
     advance(p);
     return e;
   }
@@ -520,12 +666,20 @@ static Expr* parse_primary(Parser* p, StrPool* sp) {
     Expr* e = new_expr(EXPR_IDENT, p->cur.pos);
     e->v.ident.name = p->src + p->cur.pos;
     e->v.ident.name_len = p->cur.len;
+
+    const Global* g = globals_find(globals, e->v.ident.name, e->v.ident.name_len);
+    if (!g || g->ty == 0) {
+      fprintf(stderr, "zmc: undefined identifier '%.*s'\n", (int)e->v.ident.name_len, e->v.ident.name);
+      exit(2);
+    }
+    e->ty = (Type)g->ty;
+
     advance(p);
     return e;
   }
   if (tok_is(p, TOK_LPAREN)) {
     advance(p);
-    Expr* e = parse_expr(p, sp);
+    Expr* e = parse_expr(p, sp, globals);
     expect(p, TOK_RPAREN, "')'");
     advance(p);
     return e;
@@ -535,18 +689,77 @@ static Expr* parse_primary(Parser* p, StrPool* sp) {
   exit(2);
 }
 
-static Expr* parse_expr(Parser* p, StrPool* sp) {
-  Expr* left = parse_primary(p, sp);
-  while (tok_is(p, TOK_PLUS)) {
+static Expr* parse_unary(Parser* p, StrPool* sp, const Globals* globals) {
+  if (tok_is(p, TOK_MINUS)) {
     size_t pos = p->cur.pos;
     advance(p);
-    Expr* right = parse_primary(p, sp);
-    Expr* add = new_expr(EXPR_ADD, pos);
-    add->v.add.left = left;
-    add->v.add.right = right;
-    left = add;
+    Expr* inner = parse_unary(p, sp, globals);
+    require_type(inner->ty, TY_I32, "unary -");
+    Expr* e = new_expr(EXPR_NEG, pos);
+    e->v.unary.inner = inner;
+    e->ty = TY_I32;
+    return e;
+  }
+  return parse_primary(p, sp, globals);
+}
+
+static Expr* parse_mul(Parser* p, StrPool* sp, const Globals* globals) {
+  Expr* left = parse_unary(p, sp, globals);
+  while (tok_is(p, TOK_STAR) || tok_is(p, TOK_SLASH) || tok_is(p, TOK_PERCENT)) {
+    TokKind op = p->cur.kind;
+    size_t pos = p->cur.pos;
+    advance(p);
+    Expr* right = parse_unary(p, sp, globals);
+    require_type(left->ty, TY_I32, "mul/div/mod left");
+    require_type(right->ty, TY_I32, "mul/div/mod right");
+
+    ExprKind k = EXPR_MUL;
+    if (op == TOK_STAR) k = EXPR_MUL;
+    else if (op == TOK_SLASH) k = EXPR_DIVS;
+    else if (op == TOK_PERCENT) k = EXPR_MODS;
+
+    Expr* e = new_expr(k, pos);
+    e->v.bin.left = left;
+    e->v.bin.right = right;
+    e->ty = TY_I32;
+    left = e;
   }
   return left;
+}
+
+static Expr* parse_add(Parser* p, StrPool* sp, const Globals* globals) {
+  Expr* left = parse_mul(p, sp, globals);
+  while (tok_is(p, TOK_PLUS) || tok_is(p, TOK_MINUS)) {
+    TokKind op = p->cur.kind;
+    size_t pos = p->cur.pos;
+    advance(p);
+    Expr* right = parse_mul(p, sp, globals);
+
+    if (op == TOK_PLUS && left->ty == TY_STRING && right->ty == TY_STRING) {
+      Expr* e = new_expr(EXPR_ADD, pos);
+      e->v.bin.left = left;
+      e->v.bin.right = right;
+      e->ty = TY_STRING;
+      left = e;
+      continue;
+    }
+
+    // numeric + / -
+    require_type(left->ty, TY_I32, "add/sub left");
+    require_type(right->ty, TY_I32, "add/sub right");
+
+    ExprKind k = (op == TOK_PLUS) ? EXPR_ADD : EXPR_SUB;
+    Expr* e = new_expr(k, pos);
+    e->v.bin.left = left;
+    e->v.bin.right = right;
+    e->ty = TY_I32;
+    left = e;
+  }
+  return left;
+}
+
+static Expr* parse_expr(Parser* p, StrPool* sp, const Globals* globals) {
+  return parse_add(p, sp, globals);
 }
 
 static void parse_program(Parser* p, StrPool* sp, Globals* globals, Stmts* out) {
@@ -564,12 +777,13 @@ static void parse_program(Parser* p, StrPool* sp, Globals* globals, Stmts* out) 
       expect(p, TOK_ASSIGN, "':='");
       advance(p);
 
-      Expr* value = parse_expr(p, sp);
+      Expr* value = parse_expr(p, sp, globals);
 
       expect(p, TOK_SEMI, "';'");
       advance(p);
 
-      globals_add(globals, name_ptr, name_len, is_const);
+      Global* g = globals_add(globals, name_ptr, name_len, is_const);
+      globals_set_type(g, value->ty);
 
       Stmt st;
       memset(&st, 0, sizeof(st));
@@ -592,7 +806,11 @@ static void parse_program(Parser* p, StrPool* sp, Globals* globals, Stmts* out) 
     expect(p, TOK_LPAREN, "'('");
     advance(p);
 
-    Expr* value = parse_expr(p, sp);
+    Expr* value = parse_expr(p, sp, globals);
+    if (!(value->ty == TY_STRING || value->ty == TY_I32)) {
+      fprintf(stderr, "zmc: type error (print() argument): expected string or i32, got %s\n", type_name(value->ty));
+      exit(2);
+    }
 
     expect(p, TOK_RPAREN, "')'");
     advance(p);
@@ -672,6 +890,9 @@ static void emit_expr_asm(FILE* out, const Expr* e, const Globals* globals) {
     case EXPR_STR_LIT:
       fprintf(out, "  PUSHI %s\n", e->v.str_label);
       return;
+    case EXPR_INT_LIT:
+      fprintf(out, "  PUSHI %u\n", (unsigned)e->v.int_u32);
+      return;
     case EXPR_IDENT: {
       const Global* g = globals_find(globals, e->v.ident.name, e->v.ident.name_len);
       if (!g) {
@@ -682,10 +903,43 @@ static void emit_expr_asm(FILE* out, const Expr* e, const Globals* globals) {
       fprintf(out, "  LOAD32\n");
       return;
     }
+    case EXPR_NEG:
+      emit_expr_asm(out, e->v.unary.inner, globals);
+      fprintf(out, "  NEG\n");
+      return;
+    case EXPR_TEXT:
+      emit_expr_asm(out, e->v.unary.inner, globals);
+      fprintf(out, "  SYSCALL 8\n");
+      return;
+    case EXPR_NUMBER:
+      emit_expr_asm(out, e->v.unary.inner, globals);
+      fprintf(out, "  SYSCALL 9\n");
+      return;
     case EXPR_ADD:
-      emit_expr_asm(out, e->v.add.left, globals);
-      emit_expr_asm(out, e->v.add.right, globals);
-      fprintf(out, "  CALL __zman_strcat\n");
+      emit_expr_asm(out, e->v.bin.left, globals);
+      emit_expr_asm(out, e->v.bin.right, globals);
+      if (e->ty == TY_STRING) fprintf(out, "  CALL __zman_strcat\n");
+      else fprintf(out, "  ADD\n");
+      return;
+    case EXPR_SUB:
+      emit_expr_asm(out, e->v.bin.left, globals);
+      emit_expr_asm(out, e->v.bin.right, globals);
+      fprintf(out, "  SUB\n");
+      return;
+    case EXPR_MUL:
+      emit_expr_asm(out, e->v.bin.left, globals);
+      emit_expr_asm(out, e->v.bin.right, globals);
+      fprintf(out, "  MUL\n");
+      return;
+    case EXPR_DIVS:
+      emit_expr_asm(out, e->v.bin.left, globals);
+      emit_expr_asm(out, e->v.bin.right, globals);
+      fprintf(out, "  DIVS\n");
+      return;
+    case EXPR_MODS:
+      emit_expr_asm(out, e->v.bin.left, globals);
+      emit_expr_asm(out, e->v.bin.right, globals);
+      fprintf(out, "  MODS\n");
       return;
   }
 }
@@ -777,6 +1031,9 @@ static void emit_v0_asm(FILE* out, const Stmts* stmts, const StrPool* sp, const 
       }
       case STMT_PRINT:
         emit_expr_asm(out, st->v.print.value, globals);
+        if (st->v.print.value->ty == TY_I32) {
+          fprintf(out, "  SYSCALL 8\n");
+        }
         fprintf(out, "  CALL __zman_print\n");
         fprintf(out, "  POP\n");
         break;
@@ -816,7 +1073,11 @@ static void usage(FILE* out) {
           "\n"
           "Minimal ZManLang compiler (v0).\n"
           "Currently supported subset:\n"
-          "  - print(\"...\");  (string literal only)\n");
+          "  - let/const <name> := <expr>;\n"
+          "  - print(<string-expr>);\n"
+          "  - expressions: string literals, integer literals, identifiers, parentheses\n"
+          "    - string: + (concatenation), text(<int-expr>)\n"
+          "    - int: + - * / %% and unary -, number(<string-expr>)\n");
 }
 
 int main(int argc, char** argv) {

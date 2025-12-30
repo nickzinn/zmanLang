@@ -158,7 +158,8 @@ Surface built-ins:
   - If `x` is an array, returns number of elements.
   - If `x` is a string, returns number of bytes.
 - `print(str)` -> `integer`
-  - Writes the string to stdout.
+  - Writes the value to stdout.
+  - If the argument is an `integer`, it is converted via `text(i)` first.
 - `input()` -> `string`
   - Reads a line from stdin (see runtime notes).
 - `number(str)` -> `integer`
@@ -344,13 +345,18 @@ Minimum behavior requirements:
 
 `number(str)` parses base-10 signed integers:
 
-- optional leading `-`
+- optional leading `+` or `-`
 - then one or more digits
 - stops at the first non-digit
 - returns 0 if there are no digits
 - traps on overflow outside signed 32-bit range
 
 `text(i)` returns a newly allocated string containing the base-10 ASCII representation of `i`.
+
+Implementation note (StackVM-32): this repo’s VM provides optional helper syscalls that compilers may target:
+
+- `SYSCALL 8` implements `text(i32) -> string`
+- `SYSCALL 9` implements `number(string) -> i32`
 
 ### Diagnostics
 

@@ -162,6 +162,8 @@ Recommended syscall IDs:
     •    5: read(ptr,len)          stack: ptr len -> n (reads into linear memory from stdin, returns n)
     •    6: heap_alloc(nbytes)     stack: nbytes -> ptr (4-byte aligned bump alloc; trap on OOM)
     •    7: heap_ptr()             stack: -> ptr       (current bump pointer)
+    •    8: text_i32(x)            stack: x -> p        (allocates a ZManLang string object for the decimal text of i32)
+    •    9: number(p)              stack: p -> x        (parses a ZManLang string object as i32, traps on invalid/overflow)
 
 ⸻
 

@@ -71,3 +71,4 @@ run_one test3
 
 run_one_zmc hello
 run_one_zmc concat
+run_one_zmc ints
