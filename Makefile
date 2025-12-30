@@ -14,9 +14,9 @@ EX_DIR    := examples
 BIN_DIR   := bin
 BUILD_DIR := build
 
-TOOLS := svm_asm svm_vm svm_disasm
+TOOLS := svm_asm svm_vm svm_disasm zmc
 
-SRCS := $(SRC_DIR)/svm_asm.c $(SRC_DIR)/svm_vm.c $(SRC_DIR)/svm_disasm.c
+SRCS := $(SRC_DIR)/svm_asm.c $(SRC_DIR)/svm_vm.c $(SRC_DIR)/svm_disasm.c $(SRC_DIR)/zmc.c
 OBJS := $(BUILD_DIR)/svm_asm.o $(BUILD_DIR)/svm_vm.o $(BUILD_DIR)/svm_disasm.o
 DEPS := $(OBJS:.o=.d)
 
@@ -34,6 +34,8 @@ help:
 	@echo "  disasm    Disassemble:  make disasm ZVM=program.zvm"
 	@echo "  test      Run golden output tests (./run_test.sh)"
 	@echo "  clean     Remove build/ and bin/"
+	@echo ""
+	@echo "Tools (built into bin/): $(TOOLS)"
 
 # -------- Build modes --------
 release: CFLAGS := $(BASE_CFLAGS) -O2
@@ -68,6 +70,9 @@ $(BIN_DIR)/svm_vm: $(BUILD_DIR)/svm_vm.o | $(BIN_DIR)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
 $(BIN_DIR)/svm_disasm: $(BUILD_DIR)/svm_disasm.o | $(BIN_DIR)
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+$(BIN_DIR)/zmc: $(BUILD_DIR)/zmc.o | $(BIN_DIR)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
 -include $(DEPS)

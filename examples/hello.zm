@@ -1,0 +1,2 @@
+// hello.zm - compiled by zmc
+print("Hello, world!\n");
