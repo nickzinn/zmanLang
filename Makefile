@@ -16,8 +16,11 @@ BUILD_DIR := build
 
 TOOLS := svm_asm svm_vm svm_disasm zmc
 
-SRCS := $(SRC_DIR)/svm_asm.c $(SRC_DIR)/svm_vm.c $(SRC_DIR)/svm_disasm.c $(SRC_DIR)/zmc.c
-OBJS := $(BUILD_DIR)/svm_asm.o $(BUILD_DIR)/svm_vm.o $(BUILD_DIR)/svm_disasm.o
+ZMC_SRCS := zmc_main.c zmc_util.c zmc_lexer.c zmc_ir.c zmc_parser.c zmc_codegen.c
+ZMC_OBJS := $(addprefix $(BUILD_DIR)/,$(ZMC_SRCS:.c=.o))
+
+SRCS := $(SRC_DIR)/svm_asm.c $(SRC_DIR)/svm_vm.c $(SRC_DIR)/svm_disasm.c $(addprefix $(SRC_DIR)/,$(ZMC_SRCS))
+OBJS := $(BUILD_DIR)/svm_asm.o $(BUILD_DIR)/svm_vm.o $(BUILD_DIR)/svm_disasm.o $(ZMC_OBJS)
 DEPS := $(OBJS:.o=.d)
 
 .PHONY: all release debug asan ubsan clean lint run disasm test web help
@@ -72,7 +75,7 @@ $(BIN_DIR)/svm_vm: $(BUILD_DIR)/svm_vm.o | $(BIN_DIR)
 $(BIN_DIR)/svm_disasm: $(BUILD_DIR)/svm_disasm.o | $(BIN_DIR)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
-$(BIN_DIR)/zmc: $(BUILD_DIR)/zmc.o | $(BIN_DIR)
+$(BIN_DIR)/zmc: $(ZMC_OBJS) | $(BIN_DIR)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
 -include $(DEPS)
