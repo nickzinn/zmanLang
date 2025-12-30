@@ -70,3 +70,4 @@ run_one test2
 run_one test3
 
 run_one_zmc hello
+run_one_zmc concat

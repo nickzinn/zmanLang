@@ -49,20 +49,24 @@ static void bb_init(ByteBuf* b) {
   b->cap = 0;
 }
 
-static void bb_push(ByteBuf* b, uint8_t v) {
-  if (b->len == b->cap) {
-    size_t new_cap = b->cap ? (b->cap * 2) : 32;
-    b->data = (uint8_t*)xrealloc(b->data, new_cap);
-    b->cap = new_cap;
-  }
-  b->data[b->len++] = v;
-}
-
 static void bb_free(ByteBuf* b) {
   free(b->data);
   b->data = NULL;
   b->len = 0;
   b->cap = 0;
+}
+
+static void bb_reserve(ByteBuf* b, size_t need) {
+  if (need <= b->cap) return;
+  size_t new_cap = b->cap ? b->cap : 16;
+  while (new_cap < need) new_cap *= 2;
+  b->data = (uint8_t*)xrealloc(b->data, new_cap);
+  b->cap = new_cap;
+}
+
+static void bb_push(ByteBuf* b, uint8_t v) {
+  if (b->len + 1 > b->cap) bb_reserve(b, b->len + 1);
+  b->data[b->len++] = v;
 }
 
 static char* read_entire_file(const char* path, size_t* out_len) {
@@ -105,6 +109,10 @@ static char* read_entire_file(const char* path, size_t* out_len) {
 typedef enum {
   TOK_EOF = 0,
   TOK_IDENT,
+  TOK_LET,
+  TOK_CONST,
+  TOK_ASSIGN, // :=
+  TOK_PLUS,
   TOK_LPAREN,
   TOK_RPAREN,
   TOK_SEMI,
@@ -188,6 +196,25 @@ static Token next_token(Lexer* lx) {
     t.kind = TOK_IDENT;
     t.pos = start;
     t.len = lx->i - start;
+
+    // keywords (v0 subset)
+    if (t.len == 3 && memcmp(lx->src + t.pos, "let", 3) == 0) t.kind = TOK_LET;
+    else if (t.len == 5 && memcmp(lx->src + t.pos, "const", 5) == 0) t.kind = TOK_CONST;
+
+    return t;
+  }
+
+  if (c == ':' && lx->i + 1 < lx->len && lx->src[lx->i + 1] == '=') {
+    lx->i += 2;
+    t.kind = TOK_ASSIGN;
+    t.len = 2;
+    return t;
+  }
+
+  if (c == '+') {
+    lx->i++;
+    t.kind = TOK_PLUS;
+    t.len = 1;
     return t;
   }
 
@@ -303,6 +330,152 @@ static const char* sp_add(StrPool* sp, const ByteBuf* bytes) {
 // ------------------------------ Parser (minimal) ------------------------------
 
 typedef struct {
+  char* name;
+  char* data_label;
+  bool is_const;
+} Global;
+
+typedef struct {
+  Global* items;
+  size_t len;
+  size_t cap;
+} Globals;
+
+static void globals_init(Globals* g) {
+  g->items = NULL;
+  g->len = 0;
+  g->cap = 0;
+}
+
+static void globals_free(Globals* g) {
+  for (size_t i = 0; i < g->len; i++) {
+    free(g->items[i].name);
+    free(g->items[i].data_label);
+  }
+  free(g->items);
+  g->items = NULL;
+  g->len = 0;
+  g->cap = 0;
+}
+
+static const Global* globals_find(const Globals* g, const char* name, size_t name_len) {
+  for (size_t i = 0; i < g->len; i++) {
+    if (strlen(g->items[i].name) == name_len && memcmp(g->items[i].name, name, name_len) == 0) return &g->items[i];
+  }
+  return NULL;
+}
+
+static Global* globals_add(Globals* g, const char* name, size_t name_len, bool is_const) {
+  if (globals_find(g, name, name_len)) {
+    fprintf(stderr, "zmc: duplicate global '%.*s'\n", (int)name_len, name);
+    exit(2);
+  }
+
+  if (g->len == g->cap) {
+    size_t new_cap = g->cap ? (g->cap * 2) : 16;
+    g->items = (Global*)xrealloc(g->items, new_cap * sizeof(Global));
+    g->cap = new_cap;
+  }
+
+  size_t id = g->len++;
+  Global* it = &g->items[id];
+  memset(it, 0, sizeof(*it));
+
+  it->name = (char*)xmalloc(name_len + 1);
+  memcpy(it->name, name, name_len);
+  it->name[name_len] = 0;
+
+  char tmp[128];
+  snprintf(tmp, sizeof(tmp), "g_%s", it->name);
+  it->data_label = (char*)xmalloc(strlen(tmp) + 1);
+  strcpy(it->data_label, tmp);
+
+  it->is_const = is_const;
+  return it;
+}
+
+typedef enum {
+  EXPR_STR_LIT,
+  EXPR_IDENT,
+  EXPR_ADD,
+} ExprKind;
+
+typedef struct Expr Expr;
+struct Expr {
+  ExprKind kind;
+  size_t pos;
+  union {
+    const char* str_label; // EXPR_STR_LIT
+    struct { const char* name; size_t name_len; } ident; // EXPR_IDENT
+    struct { Expr* left; Expr* right; } add; // EXPR_ADD
+  } v;
+};
+
+static Expr* new_expr(ExprKind k, size_t pos) {
+  Expr* e = (Expr*)xmalloc(sizeof(Expr));
+  memset(e, 0, sizeof(*e));
+  e->kind = k;
+  e->pos = pos;
+  return e;
+}
+
+static void free_expr(Expr* e) {
+  if (!e) return;
+  if (e->kind == EXPR_ADD) {
+    free_expr(e->v.add.left);
+    free_expr(e->v.add.right);
+  }
+  free(e);
+}
+
+typedef enum {
+  STMT_LET,
+  STMT_CONST,
+  STMT_PRINT,
+} StmtKind;
+
+typedef struct {
+  StmtKind kind;
+  size_t pos;
+  union {
+    struct { const char* name; size_t name_len; Expr* value; } bind; // let/const
+    struct { Expr* value; } print;
+  } v;
+} Stmt;
+
+typedef struct {
+  Stmt* items;
+  size_t len;
+  size_t cap;
+} Stmts;
+
+static void stmts_init(Stmts* s) {
+  s->items = NULL;
+  s->len = 0;
+  s->cap = 0;
+}
+
+static void stmts_free(Stmts* s) {
+  for (size_t i = 0; i < s->len; i++) {
+    if (s->items[i].kind == STMT_PRINT) free_expr(s->items[i].v.print.value);
+    else free_expr(s->items[i].v.bind.value);
+  }
+  free(s->items);
+  s->items = NULL;
+  s->len = 0;
+  s->cap = 0;
+}
+
+static void stmts_push(Stmts* s, Stmt st) {
+  if (s->len == s->cap) {
+    size_t new_cap = s->cap ? (s->cap * 2) : 32;
+    s->items = (Stmt*)xrealloc(s->items, new_cap * sizeof(Stmt));
+    s->cap = new_cap;
+  }
+  s->items[s->len++] = st;
+}
+
+typedef struct {
   Lexer lx;
   Token cur;
   const char* src;
@@ -328,55 +501,98 @@ static void expect(Parser* p, TokKind k, const char* what) {
   }
 }
 
-typedef struct {
-  const char** print_labels;
-  size_t print_len;
-  size_t print_cap;
-} Program;
-
-static void prog_init(Program* pr) {
-  pr->print_labels = NULL;
-  pr->print_len = 0;
-  pr->print_cap = 0;
-}
-
-static void prog_free(Program* pr) {
-  free(pr->print_labels);
-  pr->print_labels = NULL;
-  pr->print_len = 0;
-  pr->print_cap = 0;
-}
-
-static void prog_add_print(Program* pr, const char* label) {
-  if (pr->print_len == pr->print_cap) {
-    size_t new_cap = pr->print_cap ? (pr->print_cap * 2) : 16;
-    pr->print_labels = (const char**)xrealloc(pr->print_labels, new_cap * sizeof(char*));
-    pr->print_cap = new_cap;
-  }
-  pr->print_labels[pr->print_len++] = label;
-}
-
 static bool ident_is(Parser* p, const char* s) {
   size_t n = strlen(s);
   if (!tok_is(p, TOK_IDENT) || p->cur.len != n) return false;
   return memcmp(p->src + p->cur.pos, s, n) == 0;
 }
 
-static void parse_program(Parser* p, StrPool* sp, Program* out) {
+static Expr* parse_expr(Parser* p, StrPool* sp);
+
+static Expr* parse_primary(Parser* p, StrPool* sp) {
+  if (tok_is(p, TOK_STRING)) {
+    Expr* e = new_expr(EXPR_STR_LIT, p->cur.pos);
+    e->v.str_label = sp_add(sp, &p->cur.str_bytes);
+    advance(p);
+    return e;
+  }
+  if (tok_is(p, TOK_IDENT)) {
+    Expr* e = new_expr(EXPR_IDENT, p->cur.pos);
+    e->v.ident.name = p->src + p->cur.pos;
+    e->v.ident.name_len = p->cur.len;
+    advance(p);
+    return e;
+  }
+  if (tok_is(p, TOK_LPAREN)) {
+    advance(p);
+    Expr* e = parse_expr(p, sp);
+    expect(p, TOK_RPAREN, "')'");
+    advance(p);
+    return e;
+  }
+
+  fprintf(stderr, "zmc: expected expression at byte %zu\n", p->cur.pos);
+  exit(2);
+}
+
+static Expr* parse_expr(Parser* p, StrPool* sp) {
+  Expr* left = parse_primary(p, sp);
+  while (tok_is(p, TOK_PLUS)) {
+    size_t pos = p->cur.pos;
+    advance(p);
+    Expr* right = parse_primary(p, sp);
+    Expr* add = new_expr(EXPR_ADD, pos);
+    add->v.add.left = left;
+    add->v.add.right = right;
+    left = add;
+  }
+  return left;
+}
+
+static void parse_program(Parser* p, StrPool* sp, Globals* globals, Stmts* out) {
   while (!tok_is(p, TOK_EOF)) {
-    // stmt := print("...");
+    if (tok_is(p, TOK_LET) || tok_is(p, TOK_CONST)) {
+      bool is_const = tok_is(p, TOK_CONST);
+      size_t pos = p->cur.pos;
+      advance(p);
+
+      expect(p, TOK_IDENT, "identifier");
+      const char* name_ptr = p->src + p->cur.pos;
+      size_t name_len = p->cur.len;
+      advance(p);
+
+      expect(p, TOK_ASSIGN, "':='");
+      advance(p);
+
+      Expr* value = parse_expr(p, sp);
+
+      expect(p, TOK_SEMI, "';'");
+      advance(p);
+
+      globals_add(globals, name_ptr, name_len, is_const);
+
+      Stmt st;
+      memset(&st, 0, sizeof(st));
+      st.kind = is_const ? STMT_CONST : STMT_LET;
+      st.pos = pos;
+      st.v.bind.name = name_ptr;
+      st.v.bind.name_len = name_len;
+      st.v.bind.value = value;
+      stmts_push(out, st);
+      continue;
+    }
+
     if (!ident_is(p, "print")) {
-      fprintf(stderr, "zmc: only print(\"...\"); is supported in v0 (at byte %zu)\n", p->cur.pos);
+      fprintf(stderr, "zmc: expected statement at byte %zu (supported: let/const/print)\n", p->cur.pos);
       exit(2);
     }
+    size_t pos = p->cur.pos;
     advance(p);
 
     expect(p, TOK_LPAREN, "'('");
     advance(p);
 
-    expect(p, TOK_STRING, "string literal");
-    const char* label = sp_add(sp, &p->cur.str_bytes);
-    advance(p);
+    Expr* value = parse_expr(p, sp);
 
     expect(p, TOK_RPAREN, "')'");
     advance(p);
@@ -384,7 +600,12 @@ static void parse_program(Parser* p, StrPool* sp, Program* out) {
     expect(p, TOK_SEMI, "';'");
     advance(p);
 
-    prog_add_print(out, label);
+    Stmt st;
+    memset(&st, 0, sizeof(st));
+    st.kind = STMT_PRINT;
+    st.pos = pos;
+    st.v.print.value = value;
+    stmts_push(out, st);
   }
 }
 
@@ -446,13 +667,35 @@ static bool emit_bytes_as_ascii(FILE* out, const uint8_t* bytes, size_t n) {
   return true;
 }
 
-static void emit_program_asm(FILE* out, const Program* pr, const StrPool* sp) {
+static void emit_expr_asm(FILE* out, const Expr* e, const Globals* globals) {
+  switch (e->kind) {
+    case EXPR_STR_LIT:
+      fprintf(out, "  PUSHI %s\n", e->v.str_label);
+      return;
+    case EXPR_IDENT: {
+      const Global* g = globals_find(globals, e->v.ident.name, e->v.ident.name_len);
+      if (!g) {
+        fprintf(stderr, "zmc: undefined identifier '%.*s'\n", (int)e->v.ident.name_len, e->v.ident.name);
+        exit(2);
+      }
+      fprintf(out, "  PUSHI %s\n", g->data_label);
+      fprintf(out, "  LOAD32\n");
+      return;
+    }
+    case EXPR_ADD:
+      emit_expr_asm(out, e->v.add.left, globals);
+      emit_expr_asm(out, e->v.add.right, globals);
+      fprintf(out, "  CALL __zman_strcat\n");
+      return;
+  }
+}
+
+static void emit_v0_asm(FILE* out, const Stmts* stmts, const StrPool* sp, const Globals* globals) {
   fprintf(out, ".module \"zman_program\"\n\n");
   fprintf(out, ".code\n");
   fprintf(out, ".entry main\n\n");
 
-  // Helper: __zman_print(p) -> 0
-  // StackVM arg layout after CALL: p is at [fp-3]
+  // __zman_print(p) -> 0
   fprintf(out, "__zman_print:\n");
   fprintf(out, "  ENTER 0\n");
   fprintf(out, "  LDFP -3\n");
@@ -465,17 +708,93 @@ static void emit_program_asm(FILE* out, const Program* pr, const StrPool* sp) {
   fprintf(out, "  PUSHI 0\n");
   fprintf(out, "  RET 1\n\n");
 
+  // __zman_strcat(a,b) -> p
+  // Args: a at [fp-4], b at [fp-3]
+  fprintf(out, "__zman_strcat:\n");
+  fprintf(out, "  ENTER 5\n");
+  // len_a
+  fprintf(out, "  LDFP -4\n");
+  fprintf(out, "  DUP\n");
+  fprintf(out, "  LOAD32\n");
+  fprintf(out, "  STFP 0\n");
+  fprintf(out, "  POP\n");
+  // len_b
+  fprintf(out, "  LDFP -3\n");
+  fprintf(out, "  DUP\n");
+  fprintf(out, "  LOAD32\n");
+  fprintf(out, "  STFP 1\n");
+  fprintf(out, "  POP\n");
+  // total
+  fprintf(out, "  LDFP 0\n");
+  fprintf(out, "  LDFP 1\n");
+  fprintf(out, "  ADD\n");
+  fprintf(out, "  STFP 2\n");
+  // alloc ptr
+  fprintf(out, "  LDFP 2\n");
+  fprintf(out, "  ADDI 4\n");
+  fprintf(out, "  SYSCALL 6\n");
+  fprintf(out, "  DUP\n");
+  fprintf(out, "  STFP 3\n");
+  // store total at ptr
+  fprintf(out, "  DUP\n");
+  fprintf(out, "  LDFP 2\n");
+  fprintf(out, "  STORE32\n");
+  // dest_data = ptr + 4
+  fprintf(out, "  DUP\n");
+  fprintf(out, "  ADDI 4\n");
+  fprintf(out, "  STFP 4\n");
+  fprintf(out, "  POP\n");
+  // memcpy(dest_data, a+4, len_a)
+  fprintf(out, "  LDFP 4\n");
+  fprintf(out, "  LDFP -4\n");
+  fprintf(out, "  ADDI 4\n");
+  fprintf(out, "  LDFP 0\n");
+  fprintf(out, "  MEMCPY\n");
+  // memcpy(dest_data+len_a, b+4, len_b)
+  fprintf(out, "  LDFP 4\n");
+  fprintf(out, "  LDFP 0\n");
+  fprintf(out, "  ADD\n");
+  fprintf(out, "  LDFP -3\n");
+  fprintf(out, "  ADDI 4\n");
+  fprintf(out, "  LDFP 1\n");
+  fprintf(out, "  MEMCPY\n");
+  // return ptr
+  fprintf(out, "  LDFP 3\n");
+  fprintf(out, "  RET 2\n\n");
+
   fprintf(out, "main:\n");
-  for (size_t i = 0; i < pr->print_len; i++) {
-    fprintf(out, "  PUSHI %s\n", pr->print_labels[i]);
-    fprintf(out, "  CALL __zman_print\n");
-    fprintf(out, "  POP\n");
+  for (size_t i = 0; i < stmts->len; i++) {
+    const Stmt* st = &stmts->items[i];
+    switch (st->kind) {
+      case STMT_LET:
+      case STMT_CONST: {
+        const Global* g = globals_find(globals, st->v.bind.name, st->v.bind.name_len);
+        if (!g) die("internal: missing global for binding");
+        fprintf(out, "  PUSHI %s\n", g->data_label);
+        emit_expr_asm(out, st->v.bind.value, globals);
+        fprintf(out, "  STORE32\n");
+        break;
+      }
+      case STMT_PRINT:
+        emit_expr_asm(out, st->v.print.value, globals);
+        fprintf(out, "  CALL __zman_print\n");
+        fprintf(out, "  POP\n");
+        break;
+    }
   }
   fprintf(out, "  HALT\n\n");
 
   fprintf(out, ".data\n");
   fprintf(out, "  .align 4\n\n");
 
+  // globals
+  for (size_t i = 0; i < globals->len; i++) {
+    fprintf(out, "%s:\n", globals->items[i].data_label);
+    fprintf(out, "  .word 0\n");
+  }
+  if (globals->len > 0) fprintf(out, "\n");
+
+  // string literals
   for (size_t i = 0; i < sp->len; i++) {
     const StrLit* s = &sp->items[i];
     fprintf(out, "%s:\n", s->label);
@@ -518,10 +837,13 @@ int main(int argc, char** argv) {
   StrPool sp;
   sp_init(&sp);
 
-  Program pr;
-  prog_init(&pr);
+  Globals globals;
+  globals_init(&globals);
 
-  parse_program(&p, &sp, &pr);
+  Stmts stmts;
+  stmts_init(&stmts);
+
+  parse_program(&p, &sp, &globals, &stmts);
   token_free(&p.cur);
 
   FILE* out = fopen(out_path, "wb");
@@ -530,10 +852,11 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  emit_program_asm(out, &pr, &sp);
+  emit_v0_asm(out, &stmts, &sp, &globals);
   fclose(out);
 
-  prog_free(&pr);
+  stmts_free(&stmts);
+  globals_free(&globals);
   sp_free(&sp);
   free(src);
 

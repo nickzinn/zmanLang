@@ -1,0 +1,5 @@
+// v0 compiler feature test: globals + string concatenation
+
+let a := "Hello";
+let b := ", world";
+print(a + b + "!\n");
