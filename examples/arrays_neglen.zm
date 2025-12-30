@@ -1,0 +1,6 @@
+// Arrays: allocation should trap on negative length.
+
+let a := [-1];
+
+// unreachable
+print("unreached\n");

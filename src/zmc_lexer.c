@@ -221,6 +221,18 @@ Token next_token(Lexer* lx) {
     t.len = 1;
     return t;
   }
+  if (c == '[') {
+    lx->i++;
+    t.kind = TOK_LBRACK;
+    t.len = 1;
+    return t;
+  }
+  if (c == ']') {
+    lx->i++;
+    t.kind = TOK_RBRACK;
+    t.len = 1;
+    return t;
+  }
   if (c == ';') {
     lx->i++;
     t.kind = TOK_SEMI;

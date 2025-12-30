@@ -1,0 +1,6 @@
+// Arrays: bounds check should trap on negative index.
+
+let a := [1];
+
+// OOB load (negative index)
+print(text(a[-1]) + "\n");

@@ -100,7 +100,7 @@ Note: The v0 reference compiler (`zmc`) currently implements only a subset of th
 
 - `func_def` is supported, but `func_body` must be a `block` (the `:= expr ;` shorthand is not implemented yet).
 - `expr_stmt` is supported.
-- Arrays, indexing (`a[i]`), and `foreach` are not implemented yet.
+- `foreach` is not implemented yet.
 
 ```
 program        := { top_item } EOF

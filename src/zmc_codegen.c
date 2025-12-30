@@ -101,6 +101,19 @@ static void emit_expr_asm(FILE* out, const Expr* e, CodeGen* cg) {
       }
       fprintf(out, "  CALL %s\n", e->v.call.fn->label);
       return;
+    case EXPR_ARRAY_ALLOC:
+      emit_expr_asm(out, e->v.unary.inner, cg);
+      fprintf(out, "  CALL __zman_array_alloc\n");
+      return;
+    case EXPR_INDEX:
+      emit_expr_asm(out, e->v.index.base, cg);
+      emit_expr_asm(out, e->v.index.index, cg);
+      fprintf(out, "  CALL __zman_aget\n");
+      return;
+    case EXPR_LENGTH:
+      emit_expr_asm(out, e->v.unary.inner, cg);
+      fprintf(out, "  LOAD32\n");
+      return;
     case EXPR_NEG:
       emit_expr_asm(out, e->v.unary.inner, cg);
       fprintf(out, "  NEG\n");
@@ -235,6 +248,18 @@ static void emit_stmt_asm(FILE* out, const Stmt* st, const Function* cur_fn, Cod
         emit_expr_asm(out, st->v.assign.value, cg);
         fprintf(out, "  STFP %d\n", st->v.assign.slot);
       }
+      return;
+    }
+    case STMT_ASTORE: {
+      if (!st->v.astore.target || st->v.astore.target->kind != EXPR_INDEX) {
+        die("internal: astore without index target");
+      }
+      const Expr* t = st->v.astore.target;
+      emit_expr_asm(out, t->v.index.base, cg);
+      emit_expr_asm(out, t->v.index.index, cg);
+      emit_expr_asm(out, st->v.astore.value, cg);
+      fprintf(out, "  CALL __zman_aset\n");
+      fprintf(out, "  POP\n");
       return;
     }
     case STMT_PRINT:
@@ -380,6 +405,140 @@ void emit_v0_asm(FILE* out, const StmtList* stmts, const StrPool* sp, const Glob
   // return ptr
   fprintf(out, "  LDFP 3\n");
   fprintf(out, "  RET 2\n\n");
+
+  // __zman_array_alloc(n) -> p
+  // Allocates an array object [u32 len][u32 elems[len]] with elements zero-initialized.
+  // Traps if n < 0.
+  fprintf(out, "__zman_array_alloc:\n");
+  fprintf(out, "  ENTER 5\n");
+  // store n
+  fprintf(out, "  LDFP -3\n");
+  fprintf(out, "  STFP 0\n");
+  // trap if n < 0
+  fprintf(out, "  LDFP 0\n");
+  fprintf(out, "  PUSHI 0\n");
+  fprintf(out, "  LT\n");
+  fprintf(out, "  JZ L_arr_ok\n");
+  fprintf(out, "  TRAP 1\n");
+  fprintf(out, "L_arr_ok:\n");
+  // bytes = 4 + n*4
+  fprintf(out, "  LDFP 0\n");
+  fprintf(out, "  PUSHI 4\n");
+  fprintf(out, "  MUL\n");
+  fprintf(out, "  ADDI 4\n");
+  fprintf(out, "  STFP 1\n");
+  // ptr = heap_alloc(bytes)
+  fprintf(out, "  LDFP 1\n");
+  fprintf(out, "  SYSCALL 6\n");
+  fprintf(out, "  DUP\n");
+  fprintf(out, "  STFP 2\n");
+  // store len at ptr
+  fprintf(out, "  DUP\n");
+  fprintf(out, "  LDFP 0\n");
+  fprintf(out, "  STORE32\n");
+  // elem_ptr = ptr + 4
+  fprintf(out, "  DUP\n");
+  fprintf(out, "  ADDI 4\n");
+  fprintf(out, "  STFP 3\n");
+  fprintf(out, "  POP\n");
+  // i = 0
+  fprintf(out, "  PUSHI 0\n");
+  fprintf(out, "  STFP 4\n");
+  fprintf(out, "L_arr_init_head:\n");
+  fprintf(out, "  LDFP 4\n");
+  fprintf(out, "  LDFP 0\n");
+  fprintf(out, "  LT\n");
+  fprintf(out, "  JZ L_arr_init_end\n");
+  // addr = elem_ptr + i*4; *addr = 0
+  fprintf(out, "  LDFP 3\n");
+  fprintf(out, "  LDFP 4\n");
+  fprintf(out, "  PUSHI 4\n");
+  fprintf(out, "  MUL\n");
+  fprintf(out, "  ADD\n");
+  fprintf(out, "  PUSHI 0\n");
+  fprintf(out, "  STORE32\n");
+  // i++
+  fprintf(out, "  LDFP 4\n");
+  fprintf(out, "  ADDI 1\n");
+  fprintf(out, "  STFP 4\n");
+  fprintf(out, "  JMP L_arr_init_head\n");
+  fprintf(out, "L_arr_init_end:\n");
+  // return ptr
+  fprintf(out, "  LDFP 2\n");
+  fprintf(out, "  RET 1\n\n");
+
+  // __zman_aget(p, i) -> v
+  // Traps on i < 0 or i >= len.
+  fprintf(out, "__zman_aget:\n");
+  fprintf(out, "  ENTER 2\n");
+  // idx -> local0
+  fprintf(out, "  LDFP -3\n");
+  fprintf(out, "  STFP 0\n");
+  // if idx < 0 trap
+  fprintf(out, "  LDFP 0\n");
+  fprintf(out, "  PUSHI 0\n");
+  fprintf(out, "  LT\n");
+  fprintf(out, "  JZ L_aget_nonneg\n");
+  fprintf(out, "  TRAP 1\n");
+  fprintf(out, "L_aget_nonneg:\n");
+  // keep p on stack; len -> local1
+  fprintf(out, "  LDFP -4\n");
+  fprintf(out, "  DUP\n");
+  fprintf(out, "  LOAD32\n");
+  fprintf(out, "  STFP 1\n");
+  // if idx >= len trap (i < len must hold)
+  fprintf(out, "  LDFP 0\n");
+  fprintf(out, "  LDFP 1\n");
+  fprintf(out, "  LT\n");
+  fprintf(out, "  JNZ L_aget_inrange\n");
+  fprintf(out, "  TRAP 1\n");
+  fprintf(out, "L_aget_inrange:\n");
+  // addr = p + 4 + idx*4
+  fprintf(out, "  ADDI 4\n");
+  fprintf(out, "  LDFP 0\n");
+  fprintf(out, "  PUSHI 4\n");
+  fprintf(out, "  MUL\n");
+  fprintf(out, "  ADD\n");
+  fprintf(out, "  LOAD32\n");
+  fprintf(out, "  RET 2\n\n");
+
+  // __zman_aset(p, i, v) -> 0
+  // Traps on i < 0 or i >= len.
+  fprintf(out, "__zman_aset:\n");
+  fprintf(out, "  ENTER 2\n");
+  // idx -> local0
+  fprintf(out, "  LDFP -4\n");
+  fprintf(out, "  STFP 0\n");
+  // if idx < 0 trap
+  fprintf(out, "  LDFP 0\n");
+  fprintf(out, "  PUSHI 0\n");
+  fprintf(out, "  LT\n");
+  fprintf(out, "  JZ L_aset_nonneg\n");
+  fprintf(out, "  TRAP 1\n");
+  fprintf(out, "L_aset_nonneg:\n");
+  // keep p on stack; len -> local1
+  fprintf(out, "  LDFP -5\n");
+  fprintf(out, "  DUP\n");
+  fprintf(out, "  LOAD32\n");
+  fprintf(out, "  STFP 1\n");
+  // if idx >= len trap (i < len must hold)
+  fprintf(out, "  LDFP 0\n");
+  fprintf(out, "  LDFP 1\n");
+  fprintf(out, "  LT\n");
+  fprintf(out, "  JNZ L_aset_inrange\n");
+  fprintf(out, "  TRAP 1\n");
+  fprintf(out, "L_aset_inrange:\n");
+  // addr = p + 4 + idx*4
+  fprintf(out, "  ADDI 4\n");
+  fprintf(out, "  LDFP 0\n");
+  fprintf(out, "  PUSHI 4\n");
+  fprintf(out, "  MUL\n");
+  fprintf(out, "  ADD\n");
+  // store v
+  fprintf(out, "  LDFP -3\n");
+  fprintf(out, "  STORE32\n");
+  fprintf(out, "  PUSHI 0\n");
+  fprintf(out, "  RET 3\n\n");
 
   CodeGen cg;
   cg.next_label_id = 0;

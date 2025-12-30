@@ -112,6 +112,7 @@ const char* type_name(Type t) {
     case TY_STRING: return "string";
     case TY_I32: return "i32";
     case TY_BOOL: return "bool";
+    case TY_ARRAY_I32: return "array[i32]";
     default: return "<unknown>";
   }
 }
@@ -137,6 +138,14 @@ void free_expr(Expr* e) {
     case EXPR_CALL:
       for (size_t i = 0; i < e->v.call.argc; i++) free_expr(e->v.call.args[i]);
       free(e->v.call.args);
+      break;
+    case EXPR_ARRAY_ALLOC:
+    case EXPR_LENGTH:
+      free_expr(e->v.unary.inner);
+      break;
+    case EXPR_INDEX:
+      free_expr(e->v.index.base);
+      free_expr(e->v.index.index);
       break;
     case EXPR_ADD:
     case EXPR_SUB:
@@ -200,6 +209,10 @@ static void stmt_free(Stmt* st) {
       return;
     case STMT_ASSIGN:
       free_expr(st->v.assign.value);
+      return;
+    case STMT_ASTORE:
+      free_expr(st->v.astore.target);
+      free_expr(st->v.astore.value);
       return;
     case STMT_PRINT:
       free_expr(st->v.print.value);

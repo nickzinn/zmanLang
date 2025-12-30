@@ -120,7 +120,29 @@ static void set_expr_type(ParseCtx* ctx, Expr* e, Type ty) {
 static Expr* parse_expr(Parser* p, StrPool* sp, ParseCtx* ctx);
 static StmtList* parse_block(Parser* p, StrPool* sp, ParseCtx* ctx);
 
+static bool parse_binding_suffix_array(Parser* p) {
+  if (!tok_is(p, TOK_LBRACK)) return false;
+  advance(p);
+  expect(p, TOK_RBRACK, "']'");
+  advance(p);
+  return true;
+}
+
 static Expr* parse_primary(Parser* p, StrPool* sp, ParseCtx* ctx) {
+  // Array allocation: [n]
+  if (tok_is(p, TOK_LBRACK)) {
+    size_t pos = p->cur.pos;
+    advance(p);
+    Expr* n = parse_expr(p, sp, ctx);
+    require_expr_type(ctx, n, TY_I32, "array length");
+    expect(p, TOK_RBRACK, "']'");
+    advance(p);
+    Expr* e = new_expr(EXPR_ARRAY_ALLOC, pos);
+    e->v.unary.inner = n;
+    e->ty = TY_ARRAY_I32;
+    return e;
+  }
+
   if (tok_is(p, TOK_TRUE)) {
     Expr* e = new_expr(EXPR_BOOL_LIT, p->cur.pos);
     e->v.int_u32 = 1;
@@ -159,6 +181,28 @@ static Expr* parse_primary(Parser* p, StrPool* sp, ParseCtx* ctx) {
     expect(p, TOK_RPAREN, "')'");
     advance(p);
     Expr* e = new_expr(EXPR_NUMBER, pos);
+    e->v.unary.inner = inner;
+    e->ty = TY_I32;
+    return e;
+  }
+
+  if (ident_is(p, "length")) {
+    size_t pos = p->cur.pos;
+    advance(p);
+    expect(p, TOK_LPAREN, "'('");
+    advance(p);
+    Expr* inner = parse_expr(p, sp, ctx);
+    if (inner->ty == 0) {
+      fprintf(stderr, "zmc: could not infer type for length() argument\n");
+      exit(2);
+    }
+    if (!(inner->ty == TY_STRING || inner->ty == TY_ARRAY_I32)) {
+      fprintf(stderr, "zmc: type error (length() argument): expected string or array, got %s\n", type_name(inner->ty));
+      exit(2);
+    }
+    expect(p, TOK_RPAREN, "')'");
+    advance(p);
+    Expr* e = new_expr(EXPR_LENGTH, pos);
     e->v.unary.inner = inner;
     e->ty = TY_I32;
     return e;
@@ -263,6 +307,35 @@ static Expr* parse_primary(Parser* p, StrPool* sp, ParseCtx* ctx) {
   exit(2);
 }
 
+static Expr* parse_postfix(Parser* p, StrPool* sp, ParseCtx* ctx) {
+  Expr* left = parse_primary(p, sp, ctx);
+  for (;;) {
+    if (tok_is(p, TOK_LBRACK)) {
+      size_t pos = p->cur.pos;
+      advance(p);
+      Expr* idx = parse_expr(p, sp, ctx);
+      require_expr_type(ctx, idx, TY_I32, "index");
+      expect(p, TOK_RBRACK, "']'");
+      advance(p);
+
+      if (left->ty == 0) set_expr_type(ctx, left, TY_ARRAY_I32);
+      if (left->ty != TY_ARRAY_I32) {
+        fprintf(stderr, "zmc: type error (index): expected array, got %s\n", type_name(left->ty));
+        exit(2);
+      }
+
+      Expr* e = new_expr(EXPR_INDEX, pos);
+      e->v.index.base = left;
+      e->v.index.index = idx;
+      e->ty = TY_I32;
+      left = e;
+      continue;
+    }
+    break;
+  }
+  return left;
+}
+
 static Expr* parse_unary(Parser* p, StrPool* sp, ParseCtx* ctx) {
   if (tok_is(p, TOK_MINUS)) {
     size_t pos = p->cur.pos;
@@ -288,7 +361,7 @@ static Expr* parse_unary(Parser* p, StrPool* sp, ParseCtx* ctx) {
     e->ty = TY_BOOL;
     return e;
   }
-  return parse_primary(p, sp, ctx);
+  return parse_postfix(p, sp, ctx);
 }
 
 static Expr* parse_mul(Parser* p, StrPool* sp, ParseCtx* ctx) {
@@ -378,7 +451,7 @@ static Expr* parse_cmp(Parser* p, StrPool* sp, ParseCtx* ctx) {
         fprintf(stderr, "zmc: type error (equality): mismatched types %s and %s\n", type_name(left->ty), type_name(right->ty));
         exit(2);
       }
-      if (!(left->ty == TY_I32 || left->ty == TY_BOOL || left->ty == TY_STRING)) {
+      if (!(left->ty == TY_I32 || left->ty == TY_BOOL || left->ty == TY_STRING || left->ty == TY_ARRAY_I32)) {
         fprintf(stderr, "zmc: type error (equality): unsupported type %s\n", type_name(left->ty));
         exit(2);
       }
@@ -568,6 +641,9 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
     size_t name_len = p->cur.len;
     advance(p);
 
+    bool hint_array = false;
+    if (tok_is(p, TOK_LBRACK)) hint_array = parse_binding_suffix_array(p);
+
     expect(p, TOK_ASSIGN, "':='");
     advance(p);
 
@@ -585,11 +661,21 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
       ref = REF_LOCAL;
       slot = ctx->cur_fn->nlocals;
       Local* l = locals_add(&ctx->cur_fn->locals, name_ptr, name_len, is_const, slot);
-      l->ty = value->ty;
+      if (hint_array) {
+        require_expr_type(ctx, value, TY_ARRAY_I32, "array binding initializer");
+        l->ty = TY_ARRAY_I32;
+      } else {
+        l->ty = value->ty;
+      }
       ctx->cur_fn->nlocals++;
     } else {
       Global* g = globals_add(ctx->globals, name_ptr, name_len, is_const);
-      globals_set_type(g, value->ty);
+      if (hint_array) {
+        require_expr_type(ctx, value, TY_ARRAY_I32, "array binding initializer");
+        globals_set_type(g, TY_ARRAY_I32);
+      } else {
+        globals_set_type(g, value->ty);
+      }
       data_label = g->data_label;
     }
 
@@ -640,19 +726,37 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
   // Expression statement or assignment.
   Expr* first = parse_expr(p, sp, ctx);
   if (tok_is(p, TOK_ASSIGN)) {
-    if (first->kind != EXPR_IDENT) {
-      fprintf(stderr, "zmc: left-hand side of ':=' must be an identifier\n");
-      exit(2);
-    }
     size_t pos = first->pos;
-    const char* name_ptr = first->v.ident.name;
-    size_t name_len = first->v.ident.name_len;
-    free_expr(first);
 
     advance(p);
     Expr* value = parse_expr(p, sp, ctx);
     expect(p, TOK_SEMI, "';'");
     advance(p);
+
+    if (first->kind == EXPR_INDEX) {
+      // array[index] := value;
+      require_expr_type(ctx, first->v.index.base, TY_ARRAY_I32, "array store base");
+      require_expr_type(ctx, first->v.index.index, TY_I32, "array store index");
+      require_expr_type(ctx, value, TY_I32, "array store value");
+
+      Stmt st;
+      memset(&st, 0, sizeof(st));
+      st.kind = STMT_ASTORE;
+      st.pos = pos;
+      st.v.astore.target = first;
+      st.v.astore.value = value;
+      stmt_list_push(out, st);
+      return;
+    }
+
+    if (first->kind != EXPR_IDENT) {
+      fprintf(stderr, "zmc: left-hand side of ':=' must be an identifier or index expression\n");
+      exit(2);
+    }
+
+    const char* name_ptr = first->v.ident.name;
+    size_t name_len = first->v.ident.name_len;
+    free_expr(first);
 
     RefKind ref = REF_GLOBAL;
     int slot = 0;
@@ -760,6 +864,7 @@ static void parse_func_def(Parser* p, StrPool* sp, ParseCtx* ctx) {
 
   const char** param_ptrs = NULL;
   size_t* param_lens = NULL;
+  bool* param_is_array = NULL;
   size_t argc = 0;
   size_t cap = 0;
   if (!tok_is(p, TOK_RPAREN)) {
@@ -769,12 +874,17 @@ static void parse_func_def(Parser* p, StrPool* sp, ParseCtx* ctx) {
         size_t new_cap = cap ? (cap * 2) : 4;
         param_ptrs = (const char**)xrealloc((void*)param_ptrs, new_cap * sizeof(const char*));
         param_lens = (size_t*)xrealloc(param_lens, new_cap * sizeof(size_t));
+        param_is_array = (bool*)xrealloc(param_is_array, new_cap * sizeof(bool));
         cap = new_cap;
       }
       param_ptrs[argc] = p->src + p->cur.pos;
       param_lens[argc] = p->cur.len;
       argc++;
       advance(p);
+
+      bool hint_array = false;
+      if (tok_is(p, TOK_LBRACK)) hint_array = parse_binding_suffix_array(p);
+      param_is_array[argc - 1] = hint_array;
       if (tok_is(p, TOK_COMMA)) {
         advance(p);
         continue;
@@ -790,9 +900,11 @@ static void parse_func_def(Parser* p, StrPool* sp, ParseCtx* ctx) {
     fn->param_names[i] = (char*)xmalloc(param_lens[i] + 1);
     memcpy(fn->param_names[i], param_ptrs[i], param_lens[i]);
     fn->param_names[i][param_lens[i]] = 0;
+    if (param_is_array && param_is_array[i]) fn->param_types[i] = TY_ARRAY_I32;
   }
   free(param_ptrs);
   free(param_lens);
+  free(param_is_array);
 
   Function* prev = ctx->cur_fn;
   ctx->cur_fn = fn;

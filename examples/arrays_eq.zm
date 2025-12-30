@@ -1,0 +1,21 @@
+// Arrays: equality is pointer identity.
+
+let a := [1];
+let b := a;
+let c := [1];
+
+if (a = b) {
+  print("1");
+} else {
+  print("0");
+}
+
+print(",");
+
+if (a = c) {
+  print("1");
+} else {
+  print("0");
+}
+
+print("\n");

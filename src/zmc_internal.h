@@ -65,6 +65,8 @@ typedef enum {
   TOK_RPAREN,
   TOK_LBRACE,
   TOK_RBRACE,
+  TOK_LBRACK,
+  TOK_RBRACK,
   TOK_COMMA,
   TOK_SEMI,
   TOK_STRING,
@@ -130,6 +132,7 @@ typedef enum {
   TY_STRING = 1,
   TY_I32 = 2,
   TY_BOOL = 3,
+  TY_ARRAY_I32 = 4,
 } Type;
 
 typedef enum {
@@ -147,6 +150,9 @@ typedef enum {
   EXPR_BOOL_LIT,
   EXPR_IDENT,
   EXPR_CALL,
+  EXPR_ARRAY_ALLOC,
+  EXPR_INDEX,
+  EXPR_LENGTH,
   EXPR_ADD,
   EXPR_SUB,
   EXPR_MUL,
@@ -191,6 +197,10 @@ struct Expr {
       size_t argc;
       Function* fn; // resolved callee
     } call; // EXPR_CALL
+    struct {
+      Expr* base;
+      Expr* index;
+    } index; // EXPR_INDEX
     struct { Expr* left; Expr* right; } bin;   // binary
     struct { Expr* inner; } unary;             // unary
   } v;
@@ -203,6 +213,7 @@ typedef enum {
   STMT_LET,
   STMT_CONST,
   STMT_ASSIGN,
+  STMT_ASTORE,
   STMT_PRINT,
   STMT_RETURN,
   STMT_EXPR,
@@ -237,6 +248,10 @@ typedef struct {
       bool target_is_const;
       Type target_type;
     } assign;
+    struct {
+      Expr* target; // EXPR_INDEX
+      Expr* value;
+    } astore;
     struct { Expr* value; } print;
     struct { Expr* value; } ret;
     struct { Expr* value; } expr;
