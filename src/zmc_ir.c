@@ -22,6 +22,15 @@ void sp_free(StrPool* sp) {
 }
 
 const char* sp_add(StrPool* sp, const ByteBuf* bytes) {
+  // Intern identical strings: if we already have an entry with the same byte
+  // payload, reuse its label to avoid emitting duplicate literals.
+  for (size_t i = 0; i < sp->len; i++) {
+    const StrLit* it = &sp->items[i];
+    if (it->bytes.len != bytes->len) continue;
+    if (bytes->len == 0) return it->label;
+    if (memcmp(it->bytes.data, bytes->data, bytes->len) == 0) return it->label;
+  }
+
   if (sp->len == sp->cap) {
     size_t new_cap = sp->cap ? (sp->cap * 2) : 16;
     sp->items = (StrLit*)xrealloc(sp->items, new_cap * sizeof(StrLit));
