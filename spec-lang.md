@@ -72,6 +72,8 @@ The following are reserved:
 - `const`, `let`, `func`, `return`, `if`, `else`, `while`, `foreach`
 - `true`, `false`, `and`, `or`, `not`
 
+Note: v1 supports logical negation as the unary operator `!expr`. The keyword `not` is accepted as a synonym for `!`.
+
 ### Literals
 
 - Integer literal: base-10 digits with optional leading `-`.
@@ -135,7 +137,7 @@ func_body      := block | ":=" expr ";"
 Precedence (highest to lowest):
 
 1. Postfix: call `f(...)`, index `a[i]`
-2. Unary: `-x`, `not x`
+2. Unary: `-x`, `!x`, `not x`
 3. `* / %`
 4. `+ -`
 5. `< > <= >=`
@@ -149,6 +151,11 @@ Type rules (v1):
 - `< > <= >=` operate on `integer` and produce `boolean`.
 - `=` produces `boolean`.
   - For `string` and arrays, `=` compares pointer identity in v1.
+- `!x` / `not x` produces `boolean`.
+  - Operand must be `boolean` (or, for convenience in v0, any `integer` treated as false when zero and true otherwise).
+- `and` / `or` produce `boolean`.
+  - Operands must be `boolean` (or, for convenience in v0, any `integer` treated as false when zero and true otherwise).
+  - Both operators are short-circuiting: the RHS is evaluated only when needed.
 
 ## Built-in functions
 

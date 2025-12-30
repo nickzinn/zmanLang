@@ -1,0 +1,12 @@
+// v0 compiler feature test: comparisons + if/else + while + assignment
+
+let i := 0;
+while (i < 5) {
+  if (i = 2) {
+    print("two\n");
+  } else {
+    print(i);
+    print("\n");
+  }
+  i := i + 1;
+}

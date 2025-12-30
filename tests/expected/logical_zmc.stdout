@@ -1,0 +1,6 @@
+logic
+and_ok
+or_ok
+bang_ok
+paren_ok
+notkw_ok
