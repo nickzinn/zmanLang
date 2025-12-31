@@ -1,0 +1,28 @@
+print("Hello world!\n");
+print("Lets play with arrays!\n");
+
+let data := [5];
+let i := 0;
+while (i < length(data)) {
+    data[i] := i;
+    i := i + 1;
+}
+
+func printArray(array[]) {
+  print("[");
+  let first := true;
+  let j :=0;
+  while(j < length(array)) {
+    if (first) {
+      first := false;
+    } else {
+      print(", ");
+    }
+    print(text(array[j]));
+    j := j+1;
+  }
+  print("]");
+  return 0;
+}
+
+printArray(data);
