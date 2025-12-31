@@ -10,35 +10,30 @@ ZManLang is a small, statically-typed language designed to compile to StackVM-32
 
 ```
 print("Hello world!\n");
+print("Lets play with arrays!\n");
 
-func fillArray(array[], value) {
-  let i := 0;
-  while (i < length(array)) {
-    array[i] := value;
+let data := [5];
+let i := 0;
+while (i < length(data)) {
+    data[i] := i;
     i := i + 1;
-  }
 }
 
-const L := 5;
-let data := [L];
-fillArray(data, 3);
-
-func arrayToText(data) {
-  let str := "[";
+func printArray(array[]) {
+  print("[");
   let first := true;
-  foreach(v, data) {
+  foreach(v, array) {
     if (first) {
       first := false;
     } else {
-      str := str + ", ";
+      print(", ");
     }
-    str := str + text(v);
+    print(text(v));
   }
-  str := str + "]";
-  return str;
+  print("]\n");
+  return 0;
 }
-
-print(arrayToText(data) + "\n");
+printArray(data);
 
 func sum(array[]) {
   let s := 0;
@@ -49,6 +44,7 @@ func sum(array[]) {
 }
 
 print("The sum is " + text(sum(data)) + "\n");
+
 ```
 
 ## Lexical structure
@@ -100,7 +96,8 @@ Note: The v0 reference compiler (`zmc`) currently implements only a subset of th
 
 - `func_def` is supported, but `func_body` must be a `block` (the `:= expr ;` shorthand is not implemented yet).
 - `expr_stmt` is supported.
-- `foreach` is not implemented yet.
+- `foreach` is implemented for arrays (v0): `foreach(v, arrayExpr) { ... }`.
+  - Current compiler implementation requires `foreach` to appear inside a `func` (i.e. not at top level).
 
 ```
 program        := { top_item } EOF

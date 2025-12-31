@@ -1,0 +1,17 @@
+// foreach over arrays (function scope)
+
+func sum(a[]) {
+  let s := 0;
+  foreach(x, a) {
+    s := s + x;
+  }
+  return s;
+}
+
+let a := [4];
+a[0] := 3;
+a[1] := 4;
+a[2] := 5;
+a[3] := 6;
+
+print(text(sum(a)) + "\n");

@@ -80,8 +80,7 @@ const Global* globals_find(const Globals* g, const char* name, size_t name_len) 
 
 Global* globals_add(Globals* g, const char* name, size_t name_len, bool is_const) {
   if (globals_find(g, name, name_len)) {
-    fprintf(stderr, "zmc: duplicate global '%.*s'\n", (int)name_len, name);
-    exit(2);
+    zmc_failf("zmc: duplicate global '%.*s'", (int)name_len, name);
   }
 
   if (g->len == g->cap) {
@@ -232,6 +231,10 @@ static void stmt_free(Stmt* st) {
       free_expr(st->v.while_.cond);
       stmt_list_free(st->v.while_.body);
       return;
+    case STMT_FOREACH:
+      free_expr(st->v.foreach_.array);
+      stmt_list_free(st->v.foreach_.body);
+      return;
     case STMT_BLOCK:
       stmt_list_free(st->v.block.body);
       return;
@@ -263,8 +266,7 @@ Local* locals_find(Locals* l, const char* name, size_t name_len) {
 
 Local* locals_add(Locals* l, const char* name, size_t name_len, bool is_const, int slot) {
   if (locals_find(l, name, name_len)) {
-    fprintf(stderr, "zmc: duplicate local '%.*s'\n", (int)name_len, name);
-    exit(2);
+    zmc_failf("zmc: duplicate local '%.*s'", (int)name_len, name);
   }
   if (l->len == l->cap) {
     size_t new_cap = l->cap ? (l->cap * 2) : 16;
@@ -318,8 +320,7 @@ Function* ft_find(FuncTable* ft, const char* name, size_t name_len) {
 
 Function* ft_add(FuncTable* ft, const char* name, size_t name_len, size_t argc) {
   if (ft_find(ft, name, name_len)) {
-    fprintf(stderr, "zmc: duplicate function '%.*s'\n", (int)name_len, name);
-    exit(2);
+    zmc_failf("zmc: duplicate function '%.*s'", (int)name_len, name);
   }
   if (ft->len == ft->cap) {
     size_t new_cap = ft->cap ? (ft->cap * 2) : 16;

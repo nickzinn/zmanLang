@@ -1,11 +1,12 @@
-/* global createSvmVm, createSvmAsm */
+/* global createSvmVm, createSvmAsm, createZmc */
 
 (async function main() {
   const statusEl = document.getElementById('status');
   const outEl = document.getElementById('out');
-  const runBtn = document.getElementById('runBtn');
   const asmRunBtn = document.getElementById('asmRunBtn');
+  const zmRunBtn = document.getElementById('zmRunBtn');
   const asmSrcEl = document.getElementById('asmSrc');
+  const zmSrcEl = document.getElementById('zmSrc');
 
   function setStatus(s) {
     statusEl.textContent = s;
@@ -22,7 +23,7 @@
   function showError(err) {
     setStatus('Error');
     clearOut();
-    if (err && typeof err === 'object' && err.isAsmError && typeof err.message === 'string') {
+    if (err && typeof err === 'object' && (err.isAsmError || err.isZmcError) && typeof err.message === 'string') {
       appendOut(err.message);
       return;
     }
@@ -39,6 +40,7 @@
 
   let Vm;
   let Asm;
+  let Zmc;
 
   async function ensureVm() {
     if (Vm) return Vm;
@@ -56,51 +58,12 @@
     return Asm;
   }
 
-  async function runProgram() {
-    clearOut();
-    const M = await ensureVm();
-
-    setStatus('Fetching program.zvm…');
-    const resp = await fetch('./program.zvm');
-    if (!resp.ok) {
-      throw new Error(`fetch program.zvm failed: ${resp.status} ${resp.statusText}`);
-    }
-    const bytes = new Uint8Array(await resp.arrayBuffer());
-
-    // Copy container bytes into WASM memory so the VM can point into it.
-    const ptr = M._malloc(bytes.length);
-    if (!ptr) throw new Error('malloc failed');
-    M.HEAPU8.set(bytes, ptr);
-
-    const stackWords = 65536;
-    const ok = M._svm_vm_load_from_buffer(ptr, bytes.length, stackWords);
-    if (!ok) {
-      M._free(ptr);
-      throw new Error('svm_vm_load_from_buffer failed (invalid container?)');
-    }
-
-    setStatus('Running…');
-    const rc = M._svm_vm_run_loaded();
-
-    const outPtr = M._svm_vm_output_ptr();
-    const outLen = M._svm_vm_output_len();
-
-    if (outPtr && outLen) {
-      const outBytes = M.HEAPU8.slice(outPtr, outPtr + outLen);
-      const text = new TextDecoder('utf-8').decode(outBytes);
-      appendOut(text);
-    }
-
-    if (rc === -1) {
-      const trap = M._svm_vm_trap_code();
-      const ip = M._svm_vm_ip();
-      setStatus(`TRAP: code=0x${trap.toString(16).padStart(8, '0')} ip=0x${ip.toString(16).padStart(8, '0')}`);
-    } else {
-      setStatus(`Exited: rc=${rc}`);
-    }
-
-    M._svm_vm_free_loaded();
-    M._free(ptr);
+  async function ensureZmc() {
+    if (Zmc) return Zmc;
+    setStatus('Loading compiler wasm module…');
+    Zmc = await createZmc();
+    setStatus('Ready');
+    return Zmc;
   }
 
   async function assembleAndRun() {
@@ -178,11 +141,51 @@
     V._free(vmPtr);
   }
 
-  runBtn.addEventListener('click', () => {
-    runProgram().catch((err) => {
-      showError(err);
-    });
-  });
+  async function compileZmToAsm() {
+    const C = await ensureZmc();
+
+    const zmText = String(zmSrcEl && zmSrcEl.value ? zmSrcEl.value : '');
+    if (!zmText.trim()) {
+      throw new Error('source is empty');
+    }
+
+    const srcBytes = new TextEncoder().encode(zmText);
+    const srcPtr = C._malloc(srcBytes.length);
+    if (!srcPtr) throw new Error('zmc malloc failed');
+    C.HEAPU8.set(srcBytes, srcPtr);
+
+    setStatus('Compiling…');
+    const ok = C._zmc_compile_v0_asm_from_buffer(srcPtr, srcBytes.length);
+    C._free(srcPtr);
+
+    if (!ok) {
+      const errPtr = C._zmc_error_ptr();
+      const errLen = C._zmc_error_len();
+      if (errPtr && errLen) {
+        const errBytes = C.HEAPU8.slice(errPtr, errPtr + errLen);
+        const errText = new TextDecoder('utf-8').decode(errBytes);
+        const e = new Error(errText);
+        e.isZmcError = true;
+        throw e;
+      }
+      const e = new Error('compile failed');
+      e.isZmcError = true;
+      throw e;
+    }
+
+    const outPtr = C._zmc_output_ptr();
+    const outLen = C._zmc_output_len();
+    if (!outPtr || !outLen) throw new Error('compiler produced empty output');
+    const outBytes = C.HEAPU8.slice(outPtr, outPtr + outLen);
+    return new TextDecoder('utf-8').decode(outBytes);
+  }
+
+  async function compileAssembleAndRunZm() {
+    clearOut();
+    const asmText = await compileZmToAsm();
+    if (asmSrcEl) asmSrcEl.value = asmText;
+    await assembleAndRun();
+  }
 
   asmRunBtn.addEventListener('click', () => {
     assembleAndRun().catch((err) => {
@@ -190,14 +193,19 @@
     });
   });
 
+  zmRunBtn.addEventListener('click', () => {
+    compileAssembleAndRunZm().catch((err) => {
+      showError(err);
+    });
+  });
+
   // Auto-initialize modules (but do not auto-run).
-  Promise.all([ensureVm(), ensureAsm()])
+  Promise.all([ensureVm(), ensureAsm(), ensureZmc()])
     .then(async () => {
-      // Best-effort: preload the example into the textarea.
-      if (asmSrcEl && !asmSrcEl.value) {
+      if (zmSrcEl && !zmSrcEl.value) {
         try {
-          const resp = await fetch('./program.asm');
-          if (resp.ok) asmSrcEl.value = await resp.text();
+          const resp = await fetch('./program.zm');
+          if (resp.ok) zmSrcEl.value = await resp.text();
         } catch {
           // ignore
         }

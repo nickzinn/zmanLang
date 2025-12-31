@@ -19,8 +19,7 @@ bool tok_is(Parser* p, TokKind k) { return p->cur.kind == k; }
 
 void expect(Parser* p, TokKind k, const char* what) {
   if (!tok_is(p, k)) {
-    fprintf(stderr, "zmc: expected %s\n", what);
-    exit(2);
+    zmc_failf("zmc: expected %s", what);
   }
 }
 
@@ -47,8 +46,7 @@ static void require_expr_type(ParseCtx* ctx, Expr* e, Type want, const char* whe
     return;
   }
   if (e->ty != want) {
-    fprintf(stderr, "zmc: type error (%s): expected %s, got %s\n", where, type_name(want), type_name(e->ty));
-    exit(2);
+    zmc_failf("zmc: type error (%s): expected %s, got %s", where, type_name(want), type_name(e->ty));
   }
 }
 
@@ -56,8 +54,7 @@ static void resolve_ident_expr(ParseCtx* ctx, Expr* e) {
   if (!ctx->cur_fn) {
     const Global* g = globals_find(ctx->globals, e->v.ident.name, e->v.ident.name_len);
     if (!g || g->ty == 0) {
-      fprintf(stderr, "zmc: undefined identifier '%.*s'\n", (int)e->v.ident.name_len, e->v.ident.name);
-      exit(2);
+      zmc_failf("zmc: undefined identifier '%.*s'", (int)e->v.ident.name_len, e->v.ident.name);
     }
     e->v.ident.ref = REF_GLOBAL;
     e->v.ident.data_label = g->data_label;
@@ -84,8 +81,7 @@ static void resolve_ident_expr(ParseCtx* ctx, Expr* e) {
 
   const Global* g = globals_find(ctx->globals, e->v.ident.name, e->v.ident.name_len);
   if (!g || g->ty == 0) {
-    fprintf(stderr, "zmc: undefined identifier '%.*s'\n", (int)e->v.ident.name_len, e->v.ident.name);
-    exit(2);
+    zmc_failf("zmc: undefined identifier '%.*s'", (int)e->v.ident.name_len, e->v.ident.name);
   }
   e->v.ident.ref = REF_GLOBAL;
   e->v.ident.data_label = g->data_label;
@@ -97,8 +93,7 @@ static void set_expr_type(ParseCtx* ctx, Expr* e, Type ty) {
   if (e->ty == 0) {
     e->ty = ty;
   } else if (e->ty != ty) {
-    fprintf(stderr, "zmc: type error: expected %s, got %s\n", type_name(ty), type_name(e->ty));
-    exit(2);
+    zmc_failf("zmc: type error: expected %s, got %s", type_name(ty), type_name(e->ty));
   }
 
   if (ctx->cur_fn && e->kind == EXPR_IDENT) {
@@ -193,12 +188,10 @@ static Expr* parse_primary(Parser* p, StrPool* sp, ParseCtx* ctx) {
     advance(p);
     Expr* inner = parse_expr(p, sp, ctx);
     if (inner->ty == 0) {
-      fprintf(stderr, "zmc: could not infer type for length() argument\n");
-      exit(2);
+      zmc_failf("zmc: could not infer type for length() argument");
     }
     if (!(inner->ty == TY_STRING || inner->ty == TY_ARRAY_I32)) {
-      fprintf(stderr, "zmc: type error (length() argument): expected string or array, got %s\n", type_name(inner->ty));
-      exit(2);
+      zmc_failf("zmc: type error (length() argument): expected string or array, got %s", type_name(inner->ty));
     }
     expect(p, TOK_RPAREN, "')'");
     advance(p);
@@ -242,12 +235,10 @@ static Expr* parse_primary(Parser* p, StrPool* sp, ParseCtx* ctx) {
 
       Function* fn = ft_find(ctx->funcs, name_ptr, name_len);
       if (!fn) {
-        fprintf(stderr, "zmc: call to undefined function '%.*s'\n", (int)name_len, name_ptr);
-        exit(2);
+        zmc_failf("zmc: call to undefined function '%.*s'", (int)name_len, name_ptr);
       }
       if (fn->argc != call->v.call.argc) {
-        fprintf(stderr, "zmc: function '%s' expects %zu args but got %zu\n", fn->name, fn->argc, call->v.call.argc);
-        exit(2);
+        zmc_failf("zmc: function '%s' expects %zu args but got %zu", fn->name, fn->argc, call->v.call.argc);
       }
       call->v.call.fn = fn;
 
@@ -303,8 +294,7 @@ static Expr* parse_primary(Parser* p, StrPool* sp, ParseCtx* ctx) {
     return e;
   }
 
-  fprintf(stderr, "zmc: expected expression at byte %zu\n", p->cur.pos);
-  exit(2);
+  zmc_failf("zmc: expected expression at byte %zu", p->cur.pos);
 }
 
 static Expr* parse_postfix(Parser* p, StrPool* sp, ParseCtx* ctx) {
@@ -320,8 +310,7 @@ static Expr* parse_postfix(Parser* p, StrPool* sp, ParseCtx* ctx) {
 
       if (left->ty == 0) set_expr_type(ctx, left, TY_ARRAY_I32);
       if (left->ty != TY_ARRAY_I32) {
-        fprintf(stderr, "zmc: type error (index): expected array, got %s\n", type_name(left->ty));
-        exit(2);
+        zmc_failf("zmc: type error (index): expected array, got %s", type_name(left->ty));
       }
 
       Expr* e = new_expr(EXPR_INDEX, pos);
@@ -353,8 +342,7 @@ static Expr* parse_unary(Parser* p, StrPool* sp, ParseCtx* ctx) {
     Expr* inner = parse_unary(p, sp, ctx);
     if (inner->ty == 0) set_expr_type(ctx, inner, TY_I32);
     if (!(inner->ty == TY_BOOL || inner->ty == TY_I32)) {
-      fprintf(stderr, "zmc: type error (!/not): expected bool or i32, got %s\n", type_name(inner->ty));
-      exit(2);
+      zmc_failf("zmc: type error (!/not): expected bool or i32, got %s", type_name(inner->ty));
     }
     Expr* e = new_expr(EXPR_LNOT, pos);
     e->v.unary.inner = inner;
@@ -448,12 +436,10 @@ static Expr* parse_cmp(Parser* p, StrPool* sp, ParseCtx* ctx) {
         set_expr_type(ctx, right, TY_I32);
       }
       if (left->ty != right->ty) {
-        fprintf(stderr, "zmc: type error (equality): mismatched types %s and %s\n", type_name(left->ty), type_name(right->ty));
-        exit(2);
+        zmc_failf("zmc: type error (equality): mismatched types %s and %s", type_name(left->ty), type_name(right->ty));
       }
       if (!(left->ty == TY_I32 || left->ty == TY_BOOL || left->ty == TY_STRING || left->ty == TY_ARRAY_I32)) {
-        fprintf(stderr, "zmc: type error (equality): unsupported type %s\n", type_name(left->ty));
-        exit(2);
+        zmc_failf("zmc: type error (equality): unsupported type %s", type_name(left->ty));
       }
     }
 
@@ -476,8 +462,7 @@ static Expr* parse_and(Parser* p, StrPool* sp, ParseCtx* ctx) {
     if (left->ty == 0) set_expr_type(ctx, left, TY_I32);
     if (right->ty == 0) set_expr_type(ctx, right, TY_I32);
     if (!((left->ty == TY_BOOL || left->ty == TY_I32) && (right->ty == TY_BOOL || right->ty == TY_I32))) {
-      fprintf(stderr, "zmc: type error (and): expected bool or i32 operands\n");
-      exit(2);
+      zmc_failf("zmc: type error (and): expected bool or i32 operands");
     }
 
     Expr* e = new_expr(EXPR_AND, pos);
@@ -499,8 +484,7 @@ static Expr* parse_or(Parser* p, StrPool* sp, ParseCtx* ctx) {
     if (left->ty == 0) set_expr_type(ctx, left, TY_I32);
     if (right->ty == 0) set_expr_type(ctx, right, TY_I32);
     if (!((left->ty == TY_BOOL || left->ty == TY_I32) && (right->ty == TY_BOOL || right->ty == TY_I32))) {
-      fprintf(stderr, "zmc: type error (or): expected bool or i32 operands\n");
-      exit(2);
+      zmc_failf("zmc: type error (or): expected bool or i32 operands");
     }
 
     Expr* e = new_expr(EXPR_OR, pos);
@@ -527,8 +511,7 @@ static StmtList* parse_block(Parser* p, StrPool* sp, ParseCtx* ctx) {
   StmtList* body = stmt_list_new();
   while (!tok_is(p, TOK_RBRACE)) {
     if (tok_is(p, TOK_EOF)) {
-      fprintf(stderr, "zmc: unexpected EOF in block\n");
-      exit(2);
+      zmc_failf("zmc: unexpected EOF in block");
     }
     parse_stmt(p, sp, ctx, body);
   }
@@ -552,8 +535,7 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
 
   if (tok_is(p, TOK_RETURN)) {
     if (!ctx->cur_fn) {
-      fprintf(stderr, "zmc: return is only valid inside a function\n");
-      exit(2);
+      zmc_failf("zmc: return is only valid inside a function");
     }
     size_t pos = p->cur.pos;
     advance(p);
@@ -581,8 +563,7 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
     advance(p);
     Expr* cond = parse_expr(p, sp, ctx);
     if (!(cond->ty == TY_BOOL || cond->ty == TY_I32 || cond->ty == 0)) {
-      fprintf(stderr, "zmc: type error (if condition): expected bool or i32, got %s\n", type_name(cond->ty));
-      exit(2);
+      zmc_failf("zmc: type error (if condition): expected bool or i32, got %s", type_name(cond->ty));
     }
     if (cond->ty == 0) set_expr_type(ctx, cond, TY_I32);
     expect(p, TOK_RPAREN, "')'");
@@ -613,8 +594,7 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
     advance(p);
     Expr* cond = parse_expr(p, sp, ctx);
     if (!(cond->ty == TY_BOOL || cond->ty == TY_I32 || cond->ty == 0)) {
-      fprintf(stderr, "zmc: type error (while condition): expected bool or i32, got %s\n", type_name(cond->ty));
-      exit(2);
+      zmc_failf("zmc: type error (while condition): expected bool or i32, got %s", type_name(cond->ty));
     }
     if (cond->ty == 0) set_expr_type(ctx, cond, TY_I32);
     expect(p, TOK_RPAREN, "')'");
@@ -627,6 +607,55 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
     st.pos = pos;
     st.v.while_.cond = cond;
     st.v.while_.body = body;
+    stmt_list_push(out, st);
+    return;
+  }
+
+  if (tok_is(p, TOK_FOREACH)) {
+    if (!ctx->cur_fn) {
+      zmc_failf("zmc: foreach is only valid inside a function");
+    }
+    size_t pos = p->cur.pos;
+    advance(p);
+
+    expect(p, TOK_LPAREN, "'('");
+    advance(p);
+
+    expect(p, TOK_IDENT, "loop variable name");
+    const char* name_ptr = p->src + p->cur.pos;
+    size_t name_len = p->cur.len;
+    advance(p);
+
+    expect(p, TOK_COMMA, "','");
+    advance(p);
+
+    Expr* array = parse_expr(p, sp, ctx);
+    require_expr_type(ctx, array, TY_ARRAY_I32, "foreach array");
+
+    // Bind loop variable after parsing the array expression so it isn't visible there.
+    int var_slot = ctx->cur_fn->nlocals;
+    Local* l = locals_add(&ctx->cur_fn->locals, name_ptr, name_len, false, var_slot);
+    l->ty = TY_I32;
+    ctx->cur_fn->nlocals++;
+
+    // Internal locals: evaluated array pointer and current index.
+    int arr_slot = ctx->cur_fn->nlocals++;
+    int idx_slot = ctx->cur_fn->nlocals++;
+
+    expect(p, TOK_RPAREN, "')'");
+    advance(p);
+
+    StmtList* body = parse_block(p, sp, ctx);
+
+    Stmt st;
+    memset(&st, 0, sizeof(st));
+    st.kind = STMT_FOREACH;
+    st.pos = pos;
+    st.v.foreach_.array = array;
+    st.v.foreach_.var_slot = var_slot;
+    st.v.foreach_.arr_slot = arr_slot;
+    st.v.foreach_.idx_slot = idx_slot;
+    st.v.foreach_.body = body;
     stmt_list_push(out, st);
     return;
   }
@@ -703,8 +732,7 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
 
     Expr* value = parse_expr(p, sp, ctx);
     if (!(value->ty == TY_STRING || value->ty == TY_I32 || value->ty == 0)) {
-      fprintf(stderr, "zmc: type error (print() argument): expected string or i32, got %s\n", type_name(value->ty));
-      exit(2);
+      zmc_failf("zmc: type error (print() argument): expected string or i32, got %s", type_name(value->ty));
     }
     if (value->ty == 0) set_expr_type(ctx, value, TY_I32);
 
@@ -750,8 +778,7 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
     }
 
     if (first->kind != EXPR_IDENT) {
-      fprintf(stderr, "zmc: left-hand side of ':=' must be an identifier or index expression\n");
-      exit(2);
+      zmc_failf("zmc: left-hand side of ':=' must be an identifier or index expression");
     }
 
     const char* name_ptr = first->v.ident.name;
@@ -786,8 +813,7 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
     if (ref == REF_GLOBAL) {
       const Global* g = globals_find(ctx->globals, name_ptr, name_len);
       if (!g) {
-        fprintf(stderr, "zmc: assignment to undefined identifier '%.*s'\n", (int)name_len, name_ptr);
-        exit(2);
+        zmc_failf("zmc: assignment to undefined identifier '%.*s'", (int)name_len, name_ptr);
       }
       target_is_const = g->is_const;
       target_type = (Type)g->ty;
@@ -795,8 +821,7 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
     }
 
     if (target_is_const) {
-      fprintf(stderr, "zmc: cannot assign to const '%.*s'\n", (int)name_len, name_ptr);
-      exit(2);
+      zmc_failf("zmc: cannot assign to const '%.*s'", (int)name_len, name_ptr);
     }
     if (target_type != 0) {
       require_expr_type(ctx, value, target_type, "assignment");
@@ -847,6 +872,7 @@ static bool stmt_list_has_return(const StmtList* s) {
       if (st->v.if_.else_body && stmt_list_has_return(st->v.if_.else_body)) return true;
     }
     if (st->kind == STMT_WHILE && stmt_list_has_return(st->v.while_.body)) return true;
+    if (st->kind == STMT_FOREACH && stmt_list_has_return(st->v.foreach_.body)) return true;
   }
   return false;
 }
@@ -912,12 +938,10 @@ static void parse_func_def(Parser* p, StrPool* sp, ParseCtx* ctx) {
   ctx->cur_fn = prev;
 
   if (!stmt_list_has_return(fn->body)) {
-    fprintf(stderr, "zmc: function '%s' must contain a return statement (v0)\n", fn->name);
-    exit(2);
+    zmc_failf("zmc: function '%s' must contain a return statement (v0)", fn->name);
   }
   if (fn->ret_type == 0) {
-    fprintf(stderr, "zmc: could not infer return type for function '%s'\n", fn->name);
-    exit(2);
+    zmc_failf("zmc: could not infer return type for function '%s'", fn->name);
   }
 }
 

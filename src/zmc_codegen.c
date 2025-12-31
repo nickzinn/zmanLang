@@ -2,11 +2,20 @@
 
 // Purpose: Emit StackVM-32 assembly from the parsed program/AST (including runtime helpers).
 
+// The codegen is written in a FILE*-style, but for WASM we need in-memory output.
+// We keep the emitter readable by mapping fprintf/fputs/fputc to ByteBuf helpers.
+#undef fprintf
+#undef fputs
+#undef fputc
+#define fprintf(out, ...) bb_printf((out), __VA_ARGS__)
+#define fputs(s, out) bb_write_str((out), (s))
+#define fputc(c, out) bb_push((out), (uint8_t)(c))
+
 typedef struct {
   uint32_t next_label_id;
 } CodeGen;
 
-static void emit_to_bool(FILE* out, Type ty) {
+static void emit_to_bool(ByteBuf* out, Type ty) {
   if (ty == TY_BOOL) return;
   if (ty == TY_I32) {
     // value != 0 -> 1 else 0
@@ -19,7 +28,7 @@ static void emit_to_bool(FILE* out, Type ty) {
   die("internal: emit_to_bool on non-bool/non-i32");
 }
 
-static void emit_bytes_as_byte_directives(FILE* out, const uint8_t* bytes, size_t n) {
+static void emit_bytes_as_byte_directives(ByteBuf* out, const uint8_t* bytes, size_t n) {
   const size_t per_line = 16;
   for (size_t i = 0; i < n; i += per_line) {
     fprintf(out, "  .byte ");
@@ -33,7 +42,7 @@ static void emit_bytes_as_byte_directives(FILE* out, const uint8_t* bytes, size_
   }
 }
 
-static bool emit_bytes_as_ascii(FILE* out, const uint8_t* bytes, size_t n) {
+static bool emit_bytes_as_ascii(ByteBuf* out, const uint8_t* bytes, size_t n) {
   // Try to emit `.ascii "..."` using escapes supported by svm_asm.
   // IMPORTANT: the current svm_asm implementation tokenizes strings into NUL-terminated C strings,
   // so embedded NUL bytes cannot be represented safely via `.ascii`.
@@ -75,7 +84,7 @@ static bool emit_bytes_as_ascii(FILE* out, const uint8_t* bytes, size_t n) {
   return true;
 }
 
-static void emit_expr_asm(FILE* out, const Expr* e, CodeGen* cg) {
+static void emit_expr_asm(ByteBuf* out, const Expr* e, CodeGen* cg) {
   if (!e) die("internal: null expression");
   switch (e->kind) {
     case EXPR_STR_LIT:
@@ -224,9 +233,9 @@ static void emit_expr_asm(FILE* out, const Expr* e, CodeGen* cg) {
   }
 }
 
-static void emit_stmt_list_asm(FILE* out, const StmtList* list, const Function* cur_fn, CodeGen* cg);
+static void emit_stmt_list_asm(ByteBuf* out, const StmtList* list, const Function* cur_fn, CodeGen* cg);
 
-static void emit_stmt_asm(FILE* out, const Stmt* st, const Function* cur_fn, CodeGen* cg) {
+static void emit_stmt_asm(ByteBuf* out, const Stmt* st, const Function* cur_fn, CodeGen* cg) {
   switch (st->kind) {
     case STMT_LET:
     case STMT_CONST: {
@@ -317,16 +326,57 @@ static void emit_stmt_asm(FILE* out, const Stmt* st, const Function* cur_fn, Cod
       fprintf(out, "%s:\n", end_lbl);
       return;
     }
+    case STMT_FOREACH: {
+      uint32_t id = cg->next_label_id++;
+      char head_lbl[64];
+      char end_lbl[64];
+      snprintf(head_lbl, sizeof(head_lbl), "L_foreach_%u_head", (unsigned)id);
+      snprintf(end_lbl, sizeof(end_lbl), "L_foreach_%u_end", (unsigned)id);
+
+      // Evaluate array expression once.
+      emit_expr_asm(out, st->v.foreach_.array, cg);
+      fprintf(out, "  STFP %d\n", st->v.foreach_.arr_slot);
+
+      // idx = 0
+      fprintf(out, "  PUSHI 0\n");
+      fprintf(out, "  STFP %d\n", st->v.foreach_.idx_slot);
+
+      fprintf(out, "%s:\n", head_lbl);
+      // if (idx < length(arr))
+      fprintf(out, "  LDFP %d\n", st->v.foreach_.idx_slot);
+      fprintf(out, "  LDFP %d\n", st->v.foreach_.arr_slot);
+      fprintf(out, "  LOAD32\n");
+      fprintf(out, "  LT\n");
+      fprintf(out, "  JZ %s\n", end_lbl);
+
+      // var = arr[idx]
+      fprintf(out, "  LDFP %d\n", st->v.foreach_.arr_slot);
+      fprintf(out, "  LDFP %d\n", st->v.foreach_.idx_slot);
+      fprintf(out, "  CALL __zman_aget\n");
+      fprintf(out, "  STFP %d\n", st->v.foreach_.var_slot);
+
+      emit_stmt_list_asm(out, st->v.foreach_.body, cur_fn, cg);
+
+      // idx++
+      fprintf(out, "  LDFP %d\n", st->v.foreach_.idx_slot);
+      fprintf(out, "  PUSHI 1\n");
+      fprintf(out, "  ADD\n");
+      fprintf(out, "  STFP %d\n", st->v.foreach_.idx_slot);
+      fprintf(out, "  JMP %s\n", head_lbl);
+
+      fprintf(out, "%s:\n", end_lbl);
+      return;
+    }
   }
 }
 
-static void emit_stmt_list_asm(FILE* out, const StmtList* list, const Function* cur_fn, CodeGen* cg) {
+static void emit_stmt_list_asm(ByteBuf* out, const StmtList* list, const Function* cur_fn, CodeGen* cg) {
   for (size_t i = 0; i < list->len; i++) {
     emit_stmt_asm(out, &list->items[i], cur_fn, cg);
   }
 }
 
-static void emit_function_asm(FILE* out, const Function* fn, CodeGen* cg) {
+static void emit_function_asm(ByteBuf* out, const Function* fn, CodeGen* cg) {
   fprintf(out, "%s:\n", fn->label);
   fprintf(out, "  ENTER %d\n", fn->nlocals);
   emit_stmt_list_asm(out, fn->body, fn, cg);
@@ -335,7 +385,7 @@ static void emit_function_asm(FILE* out, const Function* fn, CodeGen* cg) {
   fprintf(out, "  TRAP 1\n");
 }
 
-void emit_v0_asm(FILE* out, const StmtList* stmts, const StrPool* sp, const Globals* globals, const FuncTable* funcs) {
+void emit_v0_asm(ByteBuf* out, const StmtList* stmts, const StrPool* sp, const Globals* globals, const FuncTable* funcs) {
   fprintf(out, ".module \"zman_program\"\n\n");
   fprintf(out, ".code\n");
   fprintf(out, ".entry main\n\n");

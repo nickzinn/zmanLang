@@ -138,6 +138,7 @@ run_one_zmc functions
 run_one_zmc arrays
 run_one_zmc arrays_zeroinit
 run_one_zmc arrays_eq
+run_one_zmc foreach
 
 # Array trap behavior (bounds/len checks): should trap with TRAP u16 code=1.
 run_one_zmc_expect_trap arrays_oob 0x00000001 TRAP

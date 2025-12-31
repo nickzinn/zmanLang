@@ -16,19 +16,25 @@
     <h1>StackVM-32 (WASM) harness</h1>
 
     <div id="row">
-      <button id="runBtn">Run program.zvm</button>
-      <button id="asmRunBtn">Assemble+Run program.asm</button>
+      <button id="zmRunBtn">Compile+Assemble+Run program.zm</button>
       <span id="status" class="muted">Idle</span>
     </div>
 
+    <h2>ZManLang Source</h2>
+    <textarea id="zmSrc" rows="18" style="width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
+
     <h2>Assembly Source</h2>
     <textarea id="asmSrc" rows="18" style="width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
+    <div style="margin-top: 8px;">
+      <button id="asmRunBtn">Assemble+Run</button>
+    </div>
 
     <h2>Output</h2>
     <pre id="out"></pre>
 
     <script src="./svm_vm.js"></script>
     <script src="./svm_asm.js"></script>
+    <script src="./zmc.js"></script>
     <script src="./harness.js"></script>
   </body>
 </html>

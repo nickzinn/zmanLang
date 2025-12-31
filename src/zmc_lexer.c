@@ -66,8 +66,7 @@ Token next_token(Lexer* lx) {
       if (d < '0' || d > '9') break;
       v = v * 10u + (uint64_t)(d - '0');
       if (v > 0xFFFFFFFFu) {
-        fprintf(stderr, "zmc: integer literal too large at byte %zu\n", start);
-        exit(2);
+        zmc_failf("zmc: integer literal too large at byte %zu", start);
       }
       lx->i++;
     }
@@ -94,6 +93,7 @@ Token next_token(Lexer* lx) {
     else if (t.len == 2 && memcmp(lx->src + t.pos, "if", 2) == 0) t.kind = TOK_IF;
     else if (t.len == 4 && memcmp(lx->src + t.pos, "else", 4) == 0) t.kind = TOK_ELSE;
     else if (t.len == 5 && memcmp(lx->src + t.pos, "while", 5) == 0) t.kind = TOK_WHILE;
+    else if (t.len == 7 && memcmp(lx->src + t.pos, "foreach", 7) == 0) t.kind = TOK_FOREACH;
     else if (t.len == 4 && memcmp(lx->src + t.pos, "true", 4) == 0) t.kind = TOK_TRUE;
     else if (t.len == 5 && memcmp(lx->src + t.pos, "false", 5) == 0) t.kind = TOK_FALSE;
     else if (t.len == 3 && memcmp(lx->src + t.pos, "and", 3) == 0) t.kind = TOK_AND;
@@ -277,10 +277,8 @@ Token next_token(Lexer* lx) {
       }
     }
 
-    fprintf(stderr, "zmc: unterminated string literal\n");
-    exit(2);
+    zmc_failf("zmc: unterminated string literal");
   }
 
-  fprintf(stderr, "zmc: unexpected character '%c' at byte %zu\n", c, lx->i);
-  exit(2);
+  zmc_failf("zmc: unexpected character '%c' at byte %zu", c, lx->i);
 }

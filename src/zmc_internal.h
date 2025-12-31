@@ -10,7 +10,10 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
+
+#include <setjmp.h>
 
 // ------------------------------ Utilities ------------------------------
 
@@ -27,6 +30,18 @@ typedef struct {
 } ByteBuf;
 
 ZMC_NORETURN void die(const char* msg);
+ZMC_NORETURN void zmc_failf(const char* fmt, ...);
+
+// Trap mode (for WASM / embedding): failures jump out instead of exiting.
+void zmc_trap_set(int enabled);
+int zmc_trap_active(void);
+jmp_buf* zmc_trap_jmp(void);
+
+// Error buffer (for WASM / embedding)
+uint32_t zmc_error_ptr(void);
+uint32_t zmc_error_len(void);
+void zmc_error_clear(void);
+
 void* xmalloc(size_t n);
 void* xrealloc(void* p, size_t n);
 
@@ -34,6 +49,10 @@ void bb_init(ByteBuf* b);
 void bb_free(ByteBuf* b);
 void bb_reserve(ByteBuf* b, size_t need);
 void bb_push(ByteBuf* b, uint8_t v);
+
+void bb_write(ByteBuf* b, const void* src, size_t n);
+void bb_write_str(ByteBuf* b, const char* s);
+void bb_printf(ByteBuf* b, const char* fmt, ...);
 
 char* read_entire_file(const char* path, size_t* out_len);
 
@@ -49,6 +68,7 @@ typedef enum {
   TOK_IF,
   TOK_ELSE,
   TOK_WHILE,
+  TOK_FOREACH,
   TOK_TRUE,
   TOK_FALSE,
   TOK_AND,
@@ -226,6 +246,7 @@ typedef enum {
   STMT_EXPR,
   STMT_IF,
   STMT_WHILE,
+  STMT_FOREACH,
   STMT_BLOCK,
 } StmtKind;
 
@@ -264,6 +285,13 @@ typedef struct {
     struct { Expr* value; } expr;
     struct { Expr* cond; StmtList* then_body; StmtList* else_body; } if_;
     struct { Expr* cond; StmtList* body; } while_;
+    struct {
+      Expr* array;
+      int var_slot;
+      int arr_slot;
+      int idx_slot;
+      StmtList* body;
+    } foreach_;
     struct { StmtList* body; } block;
   } v;
 } Stmt;
@@ -343,6 +371,13 @@ void parse_program(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out_main);
 
 // ------------------------------ Codegen ------------------------------
 
-void emit_v0_asm(FILE* out, const StmtList* stmts, const StrPool* sp, const Globals* globals, const FuncTable* funcs);
+void emit_v0_asm(ByteBuf* out, const StmtList* stmts, const StrPool* sp, const Globals* globals, const FuncTable* funcs);
+
+// ------------------------------ Emscripten-friendly single-instance exports ------------------------------
+// Usable from JS when compiling with emcc and -s EXPORTED_FUNCTIONS.
+int zmc_compile_v0_asm_from_buffer(uint8_t* src, uint32_t len);
+uint32_t zmc_output_ptr(void);
+uint32_t zmc_output_len(void);
+void zmc_output_clear(void);
 
 #endif
