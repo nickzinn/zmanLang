@@ -1,0 +1,298 @@
+// Comprehensive ZManLang v0 compiler regression test
+// Exercises: globals (let/const), arithmetic + precedence, comparisons, if/else,
+// while loops, short-circuit and/or, unary ! / not, strings + concatenation,
+// length() on string/array, arrays (alloc/index/store), foreach (in function),
+// recursion, and number(text(x)) roundtrip.
+
+print("kitchen_sink\n");
+
+const c := 7;
+print("c=" + text(c) + "\n");
+
+let x := 1 + 2 * 3;
+print("expr=" + text(x) + "\n");
+
+let y := (1 + 2) * 3;
+print("expr2=" + text(y) + "\n");
+
+let neg := -5;
+print("neg=" + text(neg) + "\n");
+
+print("divmod=" + text(17 / 5) + "," + text(17 % 5) + "\n");
+
+if (1 < 2 and 0 < 1) {
+  print("and1\n");
+} else {
+  print("bad\n");
+}
+
+// Short-circuit tests: RHS would trap if evaluated.
+if (0 and (1 / 0 = 0)) {
+  print("bad\n");
+} else {
+  print("sc_and_ok\n");
+}
+
+if (1 or (1 / 0 = 0)) {
+  print("sc_or_ok\n");
+} else {
+  print("bad\n");
+}
+
+if (!0) {
+  print("not_ok\n");
+} else {
+  print("bad\n");
+}
+
+let s1 := "hi";
+let s2 := "there";
+let s3 := s1 + " " + s2 + "!";
+print(s3 + "\n");
+print("slen=" + text(length(s3)) + "\n");
+
+let a := [5];
+let i := 0;
+while (i < length(a)) {
+  a[i] := i * i;
+  i := i + 1;
+}
+
+print("alen=" + text(length(a)) + "\n");
+print(text(a[0]) + "," + text(a[1]) + "," + text(a[2]) + "," + text(a[3]) + "," + text(a[4]) + "\n");
+
+let b := a;
+let a2 := [5];
+print("aid=");
+if (a = b) {
+  print("1");
+} else {
+  print("0");
+}
+print(",");
+if (a = a2) {
+  print("1");
+} else {
+  print("0");
+}
+print("\n");
+
+func sum(arr[]) {
+  let s := 0;
+  foreach(v, arr) {
+    s := s + v;
+  }
+  return s;
+}
+
+func printArray(arr[]) {
+  print("[");
+  let first := 1;
+  foreach(v, arr) {
+    if (first) {
+      first := 0;
+    } else {
+      print(",");
+    }
+    print(text(v));
+  }
+  print("]\n");
+  return 0;
+}
+
+func cloneArray(src[]) {
+  let n := length(src);
+  let dst := [n];
+  let i := 0;
+  while (i < n) {
+    dst[i] := src[i];
+    i := i + 1;
+  }
+  return dst;
+}
+
+func swap(arr[], i, j) {
+  let tmp := arr[i];
+  arr[i] := arr[j];
+  arr[j] := tmp;
+  return 0;
+}
+
+// Classic CS algorithm test: in-place bubble sort on int arrays.
+func bubbleSort(arr[]) {
+  let n := length(arr);
+  let i := 0;
+  while (i < n) {
+    let j := 0;
+    while (j < n - 1) {
+      if (arr[j] > arr[j + 1]) {
+        swap(arr, j, j + 1);
+      }
+      j := j + 1;
+    }
+    i := i + 1;
+  }
+  return 0;
+}
+
+// Insertion sort (stable, in-place)
+func insertionSort(arr[]) {
+  let n := length(arr);
+  let i := 1;
+  while (i < n) {
+    let key := arr[i];
+    let j := i - 1;
+    while (j >= 0 and arr[j] > key) {
+      arr[j + 1] := arr[j];
+      j := j - 1;
+    }
+    arr[j + 1] := key;
+    i := i + 1;
+  }
+  return 0;
+}
+
+func partition(arr[], lo, hi) {
+  let pivot := arr[hi];
+  let i := lo - 1;
+  let j := lo;
+  while (j < hi) {
+    if (arr[j] <= pivot) {
+      i := i + 1;
+      swap(arr, i, j);
+    }
+    j := j + 1;
+  }
+  swap(arr, i + 1, hi);
+  return i + 1;
+}
+
+// Quick sort (in-place, recursive)
+func quickSortRange(arr[], lo, hi) {
+  if (lo < hi) {
+    let p := partition(arr, lo, hi);
+    quickSortRange(arr, lo, p - 1);
+    quickSortRange(arr, p + 1, hi);
+  }
+  return 0;
+}
+
+func quickSort(arr[]) {
+  let n := length(arr);
+  if (n > 0) {
+    quickSortRange(arr, 0, n - 1);
+  }
+  return 0;
+}
+
+func isSorted(arr[]) {
+  let n := length(arr);
+  let i := 1;
+  let ok := 1;
+  while (i < n) {
+    if (arr[i - 1] > arr[i]) {
+      ok := 0;
+    }
+    i := i + 1;
+  }
+  return ok;
+}
+
+// Classic search algorithms
+func linearSearch(arr[], key) {
+  let n := length(arr);
+  let i := 0;
+  while (i < n) {
+    if (arr[i] = key) {
+      return i;
+    }
+    i := i + 1;
+  }
+  return -1;
+}
+
+// Returns index of key in sorted arr, or -1 if not found.
+func binarySearch(arr[], key) {
+  let lo := 0;
+  let hi := length(arr) - 1;
+  while (lo <= hi) {
+    let mid := (lo + hi) / 2;
+    let v := arr[mid];
+    if (v = key) {
+      return mid;
+    } else {
+      if (v < key) {
+        lo := mid + 1;
+      } else {
+        hi := mid - 1;
+      }
+    }
+  }
+  return -1;
+}
+
+print("sumsq=" + text(sum(a)) + "\n");
+
+let d := [16];
+d[0] := 5;
+d[1] := 1;
+d[2] := 4;
+d[3] := 2;
+d[4] := 8;
+d[5] := 0;
+d[6] := -3;
+d[7] := 9;
+d[8] := 7;
+d[9] := 6;
+d[10] := 12;
+d[11] := -1;
+d[12] := 3;
+d[13] := 10;
+d[14] := 11;
+d[15] := -2;
+
+print("sort_input=");
+printArray(d);
+
+let db := cloneArray(d);
+bubbleSort(db);
+print("bubble=");
+printArray(db);
+print("bubble_sorted=");
+if (isSorted(db)) { print("1\n"); } else { print("0\n"); }
+
+let di := cloneArray(d);
+insertionSort(di);
+print("insertion=");
+printArray(di);
+print("insertion_sorted=");
+if (isSorted(di)) { print("1\n"); } else { print("0\n"); }
+
+let dq := cloneArray(d);
+quickSort(dq);
+print("quick=");
+printArray(dq);
+print("quick_sorted=");
+if (isSorted(dq)) { print("1\n"); } else { print("0\n"); }
+
+// Search on sorted array (dq)
+print("search_lin_-2=" + text(linearSearch(dq, -2)) + "\n");
+print("search_bin_-2=" + text(binarySearch(dq, -2)) + "\n");
+print("search_lin_42=" + text(linearSearch(dq, 42)) + "\n");
+print("search_bin_42=" + text(binarySearch(dq, 42)) + "\n");
+
+func fact(n) {
+  if (n = 0) {
+    return 1;
+  } else {
+    return n * fact(n - 1);
+  }
+}
+
+print("fact6=" + text(fact(6)) + "\n");
+
+let round := number(text(-12345));
+print("round=" + text(round) + "\n");
+
+let e := "x\n";
+print("elen=" + text(length(e)) + "\n");

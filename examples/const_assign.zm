@@ -1,0 +1,4 @@
+// Negative test: assigning to const must be rejected at compile time.
+
+const x := 1;
+x := 2;

@@ -125,6 +125,48 @@ run_one_zmc_expect_trap() {
 	echo "ok: ${name}_zmc_trap"
 }
 
+run_one_zmc_expect_compile_error() {
+	name="$1"
+	src="examples/${name}.zm"
+	asm="build/${name}.asm"
+	out="build/${name}.stdout"
+	err="build/${name}.stderr"
+	exp="tests/expected/${name}_zmc.stderr"
+
+	if [ ! -f "$src" ]; then
+		echo "missing source: $src" >&2
+		exit 2
+	fi
+	if [ ! -f "$exp" ]; then
+		echo "missing expected stderr: $exp" >&2
+		exit 2
+	fi
+
+	set +e
+	./bin/zmc "$src" "$asm" >"$out" 2>"$err"
+	rc=$?
+	set -e
+
+	if [ "$rc" -eq 0 ]; then
+		echo "FAIL: ${name}_zmc expected compile error, but exited 0" >&2
+		exit 1
+	fi
+
+	if [ -s "$out" ]; then
+		echo "FAIL: ${name}_zmc expected no stdout" >&2
+		echo "--- stdout ---" >&2
+		cat "$out" >&2
+		exit 1
+	fi
+
+	if diff -u "$exp" "$err"; then
+		echo "ok: ${name}_zmc_compile_error"
+	else
+		echo "FAIL: ${name}_zmc stderr mismatch" >&2
+		exit 1
+	fi
+}
+
 run_one test1
 run_one test2
 run_one test3
@@ -139,8 +181,12 @@ run_one_zmc arrays
 run_one_zmc arrays_zeroinit
 run_one_zmc arrays_eq
 run_one_zmc foreach
+run_one_zmc kitchen_sink
 
 # Array trap behavior (bounds/len checks): should trap with TRAP u16 code=1.
 run_one_zmc_expect_trap arrays_oob 0x00000001 TRAP
 run_one_zmc_expect_trap arrays_negidx 0x00000001 TRAP
 run_one_zmc_expect_trap arrays_neglen 0x00000001 TRAP
+
+# zmc compile-time error behavior
+run_one_zmc_expect_compile_error const_assign
