@@ -11,22 +11,18 @@ while (i < length(data)) {
 func printArray(array[]) {
   print("[");
   let first := true;
-  let j :=0;
-  while(j < length(array)) {
+  foreach(v, array) {
     if (first) {
       first := false;
     } else {
       print(", ");
     }
-    print(text(array[j]));
-    j := j+1;
+    print(text(v));
   }
-  print("]");
+  print("]\n");
   return 0;
 }
-
 printArray(data);
-
 
 func sum(array[]) {
   let s := 0;

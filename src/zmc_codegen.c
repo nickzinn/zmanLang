@@ -13,7 +13,127 @@
 
 typedef struct {
   uint32_t next_label_id;
+  uint32_t used_helpers;
 } CodeGen;
+
+typedef enum {
+  RT_HELPER_PRINT      = 1u << 0,
+  RT_HELPER_STRCAT     = 1u << 1,
+  RT_HELPER_ARRAY_ALLOC= 1u << 2,
+  RT_HELPER_AGET       = 1u << 3,
+  RT_HELPER_ASET       = 1u << 4,
+} RuntimeHelper;
+
+static void mark_helpers_expr(const Expr* e, CodeGen* cg);
+static void mark_helpers_stmt_list(const StmtList* list, CodeGen* cg);
+
+static void mark_helpers_expr(const Expr* e, CodeGen* cg) {
+  if (!e) return;
+  switch (e->kind) {
+    case EXPR_STR_LIT:
+    case EXPR_INT_LIT:
+    case EXPR_BOOL_LIT:
+    case EXPR_IDENT:
+      return;
+    case EXPR_CALL:
+      for (size_t i = 0; i < e->v.call.argc; i++) {
+        mark_helpers_expr(e->v.call.args[i], cg);
+      }
+      return;
+    case EXPR_ARRAY_ALLOC:
+      cg->used_helpers |= RT_HELPER_ARRAY_ALLOC;
+      mark_helpers_expr(e->v.unary.inner, cg);
+      return;
+    case EXPR_INDEX:
+      cg->used_helpers |= RT_HELPER_AGET;
+      mark_helpers_expr(e->v.index.base, cg);
+      mark_helpers_expr(e->v.index.index, cg);
+      return;
+    case EXPR_LENGTH:
+    case EXPR_NEG:
+    case EXPR_LNOT:
+    case EXPR_TEXT:
+    case EXPR_NUMBER:
+      mark_helpers_expr(e->v.unary.inner, cg);
+      return;
+
+    case EXPR_ADD:
+      if (e->ty == TY_STRING) cg->used_helpers |= RT_HELPER_STRCAT;
+      mark_helpers_expr(e->v.bin.left, cg);
+      mark_helpers_expr(e->v.bin.right, cg);
+      return;
+    case EXPR_SUB:
+    case EXPR_MUL:
+    case EXPR_DIVS:
+    case EXPR_MODS:
+    case EXPR_LT:
+    case EXPR_GT:
+    case EXPR_LE:
+    case EXPR_GE:
+    case EXPR_EQ:
+    case EXPR_NE:
+    case EXPR_AND:
+    case EXPR_OR:
+      mark_helpers_expr(e->v.bin.left, cg);
+      mark_helpers_expr(e->v.bin.right, cg);
+      return;
+  }
+}
+
+static void mark_helpers_stmt(const Stmt* st, CodeGen* cg) {
+  switch (st->kind) {
+    case STMT_LET:
+    case STMT_CONST:
+      mark_helpers_expr(st->v.bind.value, cg);
+      return;
+    case STMT_ASSIGN:
+      mark_helpers_expr(st->v.assign.value, cg);
+      return;
+    case STMT_ASTORE:
+      cg->used_helpers |= RT_HELPER_ASET;
+      if (st->v.astore.target && st->v.astore.target->kind == EXPR_INDEX) {
+        mark_helpers_expr(st->v.astore.target->v.index.base, cg);
+        mark_helpers_expr(st->v.astore.target->v.index.index, cg);
+      } else {
+        mark_helpers_expr(st->v.astore.target, cg);
+      }
+      mark_helpers_expr(st->v.astore.value, cg);
+      return;
+    case STMT_PRINT:
+      cg->used_helpers |= RT_HELPER_PRINT;
+      mark_helpers_expr(st->v.print.value, cg);
+      return;
+    case STMT_RETURN:
+      mark_helpers_expr(st->v.ret.value, cg);
+      return;
+    case STMT_EXPR:
+      mark_helpers_expr(st->v.expr.value, cg);
+      return;
+    case STMT_BLOCK:
+      mark_helpers_stmt_list(st->v.block.body, cg);
+      return;
+    case STMT_IF:
+      mark_helpers_expr(st->v.if_.cond, cg);
+      mark_helpers_stmt_list(st->v.if_.then_body, cg);
+      if (st->v.if_.else_body) mark_helpers_stmt_list(st->v.if_.else_body, cg);
+      return;
+    case STMT_WHILE:
+      mark_helpers_expr(st->v.while_.cond, cg);
+      mark_helpers_stmt_list(st->v.while_.body, cg);
+      return;
+    case STMT_FOREACH:
+      cg->used_helpers |= RT_HELPER_AGET;
+      mark_helpers_expr(st->v.foreach_.array, cg);
+      mark_helpers_stmt_list(st->v.foreach_.body, cg);
+      return;
+  }
+}
+
+static void mark_helpers_stmt_list(const StmtList* list, CodeGen* cg) {
+  for (size_t i = 0; i < list->len; i++) {
+    mark_helpers_stmt(&list->items[i], cg);
+  }
+}
 
 static void emit_to_bool(ByteBuf* out, Type ty) {
   if (ty == TY_BOOL) return;
@@ -386,213 +506,230 @@ static void emit_function_asm(ByteBuf* out, const Function* fn, CodeGen* cg) {
 }
 
 void emit_v0_asm(ByteBuf* out, const StmtList* stmts, const StrPool* sp, const Globals* globals, const FuncTable* funcs) {
+  CodeGen cg;
+  cg.next_label_id = 0;
+  cg.used_helpers = 0;
+
+  // Pre-pass: determine which runtime helpers are actually referenced.
+  for (size_t i = 0; i < funcs->len; i++) {
+    mark_helpers_stmt_list(funcs->items[i].body, &cg);
+  }
+  mark_helpers_stmt_list(stmts, &cg);
+
   fprintf(out, ".module \"zman_program\"\n\n");
   fprintf(out, ".code\n");
   fprintf(out, ".entry main\n\n");
 
-  // __zman_print(p) -> 0
-  fprintf(out, "__zman_print:\n");
-  fprintf(out, "  ENTER 0\n");
-  fprintf(out, "  LDFP -3\n");
-  fprintf(out, "  DUP\n");
-  fprintf(out, "  LOAD32\n");
-  fprintf(out, "  SWAP\n");
-  fprintf(out, "  ADDI 4\n");
-  fprintf(out, "  SWAP\n");
-  fprintf(out, "  SYSCALL 4\n");
-  fprintf(out, "  PUSHI 0\n");
-  fprintf(out, "  RET 1\n\n");
+  if (cg.used_helpers & RT_HELPER_PRINT) {
+    // __zman_print(p) -> 0
+    fprintf(out, "__zman_print:\n");
+    fprintf(out, "  ENTER 0\n");
+    fprintf(out, "  LDFP -3\n");
+    fprintf(out, "  DUP\n");
+    fprintf(out, "  LOAD32\n");
+    fprintf(out, "  SWAP\n");
+    fprintf(out, "  ADDI 4\n");
+    fprintf(out, "  SWAP\n");
+    fprintf(out, "  SYSCALL 4\n");
+    fprintf(out, "  PUSHI 0\n");
+    fprintf(out, "  RET 1\n\n");
+  }
 
-  // __zman_strcat(a,b) -> p
-  // Args: a at [fp-4], b at [fp-3]
-  fprintf(out, "__zman_strcat:\n");
-  fprintf(out, "  ENTER 5\n");
-  // len_a
-  fprintf(out, "  LDFP -4\n");
-  fprintf(out, "  DUP\n");
-  fprintf(out, "  LOAD32\n");
-  fprintf(out, "  STFP 0\n");
-  fprintf(out, "  POP\n");
-  // len_b
-  fprintf(out, "  LDFP -3\n");
-  fprintf(out, "  DUP\n");
-  fprintf(out, "  LOAD32\n");
-  fprintf(out, "  STFP 1\n");
-  fprintf(out, "  POP\n");
-  // total
-  fprintf(out, "  LDFP 0\n");
-  fprintf(out, "  LDFP 1\n");
-  fprintf(out, "  ADD\n");
-  fprintf(out, "  STFP 2\n");
-  // alloc ptr
-  fprintf(out, "  LDFP 2\n");
-  fprintf(out, "  ADDI 4\n");
-  fprintf(out, "  SYSCALL 6\n");
-  fprintf(out, "  DUP\n");
-  fprintf(out, "  STFP 3\n");
-  // store total at ptr
-  fprintf(out, "  DUP\n");
-  fprintf(out, "  LDFP 2\n");
-  fprintf(out, "  STORE32\n");
-  // dest_data = ptr + 4
-  fprintf(out, "  DUP\n");
-  fprintf(out, "  ADDI 4\n");
-  fprintf(out, "  STFP 4\n");
-  fprintf(out, "  POP\n");
-  // memcpy(dest_data, a+4, len_a)
-  fprintf(out, "  LDFP 4\n");
-  fprintf(out, "  LDFP -4\n");
-  fprintf(out, "  ADDI 4\n");
-  fprintf(out, "  LDFP 0\n");
-  fprintf(out, "  MEMCPY\n");
-  // memcpy(dest_data+len_a, b+4, len_b)
-  fprintf(out, "  LDFP 4\n");
-  fprintf(out, "  LDFP 0\n");
-  fprintf(out, "  ADD\n");
-  fprintf(out, "  LDFP -3\n");
-  fprintf(out, "  ADDI 4\n");
-  fprintf(out, "  LDFP 1\n");
-  fprintf(out, "  MEMCPY\n");
-  // return ptr
-  fprintf(out, "  LDFP 3\n");
-  fprintf(out, "  RET 2\n\n");
+  if (cg.used_helpers & RT_HELPER_STRCAT) {
+    // __zman_strcat(a,b) -> p
+    // Args: a at [fp-4], b at [fp-3]
+    fprintf(out, "__zman_strcat:\n");
+    fprintf(out, "  ENTER 5\n");
+    // len_a
+    fprintf(out, "  LDFP -4\n");
+    fprintf(out, "  DUP\n");
+    fprintf(out, "  LOAD32\n");
+    fprintf(out, "  STFP 0\n");
+    fprintf(out, "  POP\n");
+    // len_b
+    fprintf(out, "  LDFP -3\n");
+    fprintf(out, "  DUP\n");
+    fprintf(out, "  LOAD32\n");
+    fprintf(out, "  STFP 1\n");
+    fprintf(out, "  POP\n");
+    // total
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  LDFP 1\n");
+    fprintf(out, "  ADD\n");
+    fprintf(out, "  STFP 2\n");
+    // alloc ptr
+    fprintf(out, "  LDFP 2\n");
+    fprintf(out, "  ADDI 4\n");
+    fprintf(out, "  SYSCALL 6\n");
+    fprintf(out, "  DUP\n");
+    fprintf(out, "  STFP 3\n");
+    // store total at ptr
+    fprintf(out, "  DUP\n");
+    fprintf(out, "  LDFP 2\n");
+    fprintf(out, "  STORE32\n");
+    // dest_data = ptr + 4
+    fprintf(out, "  DUP\n");
+    fprintf(out, "  ADDI 4\n");
+    fprintf(out, "  STFP 4\n");
+    fprintf(out, "  POP\n");
+    // memcpy(dest_data, a+4, len_a)
+    fprintf(out, "  LDFP 4\n");
+    fprintf(out, "  LDFP -4\n");
+    fprintf(out, "  ADDI 4\n");
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  MEMCPY\n");
+    // memcpy(dest_data+len_a, b+4, len_b)
+    fprintf(out, "  LDFP 4\n");
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  ADD\n");
+    fprintf(out, "  LDFP -3\n");
+    fprintf(out, "  ADDI 4\n");
+    fprintf(out, "  LDFP 1\n");
+    fprintf(out, "  MEMCPY\n");
+    // return ptr
+    fprintf(out, "  LDFP 3\n");
+    fprintf(out, "  RET 2\n\n");
+  }
 
-  // __zman_array_alloc(n) -> p
-  // Allocates an array object [u32 len][u32 elems[len]] with elements zero-initialized.
-  // Traps if n < 0.
-  fprintf(out, "__zman_array_alloc:\n");
-  fprintf(out, "  ENTER 5\n");
-  // store n
-  fprintf(out, "  LDFP -3\n");
-  fprintf(out, "  STFP 0\n");
-  // trap if n < 0
-  fprintf(out, "  LDFP 0\n");
-  fprintf(out, "  PUSHI 0\n");
-  fprintf(out, "  LT\n");
-  fprintf(out, "  JZ L_arr_ok\n");
-  fprintf(out, "  TRAP 1\n");
-  fprintf(out, "L_arr_ok:\n");
-  // bytes = 4 + n*4
-  fprintf(out, "  LDFP 0\n");
-  fprintf(out, "  PUSHI 4\n");
-  fprintf(out, "  MUL\n");
-  fprintf(out, "  ADDI 4\n");
-  fprintf(out, "  STFP 1\n");
-  // ptr = heap_alloc(bytes)
-  fprintf(out, "  LDFP 1\n");
-  fprintf(out, "  SYSCALL 6\n");
-  fprintf(out, "  DUP\n");
-  fprintf(out, "  STFP 2\n");
-  // store len at ptr
-  fprintf(out, "  DUP\n");
-  fprintf(out, "  LDFP 0\n");
-  fprintf(out, "  STORE32\n");
-  // elem_ptr = ptr + 4
-  fprintf(out, "  DUP\n");
-  fprintf(out, "  ADDI 4\n");
-  fprintf(out, "  STFP 3\n");
-  fprintf(out, "  POP\n");
-  // i = 0
-  fprintf(out, "  PUSHI 0\n");
-  fprintf(out, "  STFP 4\n");
-  fprintf(out, "L_arr_init_head:\n");
-  fprintf(out, "  LDFP 4\n");
-  fprintf(out, "  LDFP 0\n");
-  fprintf(out, "  LT\n");
-  fprintf(out, "  JZ L_arr_init_end\n");
-  // addr = elem_ptr + i*4; *addr = 0
-  fprintf(out, "  LDFP 3\n");
-  fprintf(out, "  LDFP 4\n");
-  fprintf(out, "  PUSHI 4\n");
-  fprintf(out, "  MUL\n");
-  fprintf(out, "  ADD\n");
-  fprintf(out, "  PUSHI 0\n");
-  fprintf(out, "  STORE32\n");
-  // i++
-  fprintf(out, "  LDFP 4\n");
-  fprintf(out, "  ADDI 1\n");
-  fprintf(out, "  STFP 4\n");
-  fprintf(out, "  JMP L_arr_init_head\n");
-  fprintf(out, "L_arr_init_end:\n");
-  // return ptr
-  fprintf(out, "  LDFP 2\n");
-  fprintf(out, "  RET 1\n\n");
+  if (cg.used_helpers & RT_HELPER_ARRAY_ALLOC) {
+    // __zman_array_alloc(n) -> p
+    // Allocates an array object [u32 len][u32 elems[len]] with elements zero-initialized.
+    // Traps if n < 0.
+    fprintf(out, "__zman_array_alloc:\n");
+    fprintf(out, "  ENTER 5\n");
+    // store n
+    fprintf(out, "  LDFP -3\n");
+    fprintf(out, "  STFP 0\n");
+    // trap if n < 0
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  PUSHI 0\n");
+    fprintf(out, "  LT\n");
+    fprintf(out, "  JZ L_arr_ok\n");
+    fprintf(out, "  TRAP 1\n");
+    fprintf(out, "L_arr_ok:\n");
+    // bytes = 4 + n*4
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  PUSHI 4\n");
+    fprintf(out, "  MUL\n");
+    fprintf(out, "  ADDI 4\n");
+    fprintf(out, "  STFP 1\n");
+    // ptr = heap_alloc(bytes)
+    fprintf(out, "  LDFP 1\n");
+    fprintf(out, "  SYSCALL 6\n");
+    fprintf(out, "  DUP\n");
+    fprintf(out, "  STFP 2\n");
+    // store len at ptr
+    fprintf(out, "  DUP\n");
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  STORE32\n");
+    // elem_ptr = ptr + 4
+    fprintf(out, "  DUP\n");
+    fprintf(out, "  ADDI 4\n");
+    fprintf(out, "  STFP 3\n");
+    fprintf(out, "  POP\n");
+    // i = 0
+    fprintf(out, "  PUSHI 0\n");
+    fprintf(out, "  STFP 4\n");
+    fprintf(out, "L_arr_init_head:\n");
+    fprintf(out, "  LDFP 4\n");
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  LT\n");
+    fprintf(out, "  JZ L_arr_init_end\n");
+    // addr = elem_ptr + i*4; *addr = 0
+    fprintf(out, "  LDFP 3\n");
+    fprintf(out, "  LDFP 4\n");
+    fprintf(out, "  PUSHI 4\n");
+    fprintf(out, "  MUL\n");
+    fprintf(out, "  ADD\n");
+    fprintf(out, "  PUSHI 0\n");
+    fprintf(out, "  STORE32\n");
+    // i++
+    fprintf(out, "  LDFP 4\n");
+    fprintf(out, "  ADDI 1\n");
+    fprintf(out, "  STFP 4\n");
+    fprintf(out, "  JMP L_arr_init_head\n");
+    fprintf(out, "L_arr_init_end:\n");
+    // return ptr
+    fprintf(out, "  LDFP 2\n");
+    fprintf(out, "  RET 1\n\n");
+  }
 
-  // __zman_aget(p, i) -> v
-  // Traps on i < 0 or i >= len.
-  fprintf(out, "__zman_aget:\n");
-  fprintf(out, "  ENTER 2\n");
-  // idx -> local0
-  fprintf(out, "  LDFP -3\n");
-  fprintf(out, "  STFP 0\n");
-  // if idx < 0 trap
-  fprintf(out, "  LDFP 0\n");
-  fprintf(out, "  PUSHI 0\n");
-  fprintf(out, "  LT\n");
-  fprintf(out, "  JZ L_aget_nonneg\n");
-  fprintf(out, "  TRAP 1\n");
-  fprintf(out, "L_aget_nonneg:\n");
-  // keep p on stack; len -> local1
-  fprintf(out, "  LDFP -4\n");
-  fprintf(out, "  DUP\n");
-  fprintf(out, "  LOAD32\n");
-  fprintf(out, "  STFP 1\n");
-  // if idx >= len trap (i < len must hold)
-  fprintf(out, "  LDFP 0\n");
-  fprintf(out, "  LDFP 1\n");
-  fprintf(out, "  LT\n");
-  fprintf(out, "  JNZ L_aget_inrange\n");
-  fprintf(out, "  TRAP 1\n");
-  fprintf(out, "L_aget_inrange:\n");
-  // addr = p + 4 + idx*4
-  fprintf(out, "  ADDI 4\n");
-  fprintf(out, "  LDFP 0\n");
-  fprintf(out, "  PUSHI 4\n");
-  fprintf(out, "  MUL\n");
-  fprintf(out, "  ADD\n");
-  fprintf(out, "  LOAD32\n");
-  fprintf(out, "  RET 2\n\n");
+  if (cg.used_helpers & RT_HELPER_AGET) {
+    // __zman_aget(p, i) -> v
+    // Traps on i < 0 or i >= len.
+    fprintf(out, "__zman_aget:\n");
+    fprintf(out, "  ENTER 2\n");
+    // idx -> local0
+    fprintf(out, "  LDFP -3\n");
+    fprintf(out, "  STFP 0\n");
+    // if idx < 0 trap
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  PUSHI 0\n");
+    fprintf(out, "  LT\n");
+    fprintf(out, "  JZ L_aget_nonneg\n");
+    fprintf(out, "  TRAP 1\n");
+    fprintf(out, "L_aget_nonneg:\n");
+    // keep p on stack; len -> local1
+    fprintf(out, "  LDFP -4\n");
+    fprintf(out, "  DUP\n");
+    fprintf(out, "  LOAD32\n");
+    fprintf(out, "  STFP 1\n");
+    // if idx >= len trap (i < len must hold)
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  LDFP 1\n");
+    fprintf(out, "  LT\n");
+    fprintf(out, "  JNZ L_aget_inrange\n");
+    fprintf(out, "  TRAP 1\n");
+    fprintf(out, "L_aget_inrange:\n");
+    // addr = p + 4 + idx*4
+    fprintf(out, "  ADDI 4\n");
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  PUSHI 4\n");
+    fprintf(out, "  MUL\n");
+    fprintf(out, "  ADD\n");
+    fprintf(out, "  LOAD32\n");
+    fprintf(out, "  RET 2\n\n");
+  }
 
-  // __zman_aset(p, i, v) -> 0
-  // Traps on i < 0 or i >= len.
-  fprintf(out, "__zman_aset:\n");
-  fprintf(out, "  ENTER 2\n");
-  // idx -> local0
-  fprintf(out, "  LDFP -4\n");
-  fprintf(out, "  STFP 0\n");
-  // if idx < 0 trap
-  fprintf(out, "  LDFP 0\n");
-  fprintf(out, "  PUSHI 0\n");
-  fprintf(out, "  LT\n");
-  fprintf(out, "  JZ L_aset_nonneg\n");
-  fprintf(out, "  TRAP 1\n");
-  fprintf(out, "L_aset_nonneg:\n");
-  // keep p on stack; len -> local1
-  fprintf(out, "  LDFP -5\n");
-  fprintf(out, "  DUP\n");
-  fprintf(out, "  LOAD32\n");
-  fprintf(out, "  STFP 1\n");
-  // if idx >= len trap (i < len must hold)
-  fprintf(out, "  LDFP 0\n");
-  fprintf(out, "  LDFP 1\n");
-  fprintf(out, "  LT\n");
-  fprintf(out, "  JNZ L_aset_inrange\n");
-  fprintf(out, "  TRAP 1\n");
-  fprintf(out, "L_aset_inrange:\n");
-  // addr = p + 4 + idx*4
-  fprintf(out, "  ADDI 4\n");
-  fprintf(out, "  LDFP 0\n");
-  fprintf(out, "  PUSHI 4\n");
-  fprintf(out, "  MUL\n");
-  fprintf(out, "  ADD\n");
-  // store v
-  fprintf(out, "  LDFP -3\n");
-  fprintf(out, "  STORE32\n");
-  fprintf(out, "  PUSHI 0\n");
-  fprintf(out, "  RET 3\n\n");
-
-  CodeGen cg;
-  cg.next_label_id = 0;
+  if (cg.used_helpers & RT_HELPER_ASET) {
+    // __zman_aset(p, i, v) -> 0
+    // Traps on i < 0 or i >= len.
+    fprintf(out, "__zman_aset:\n");
+    fprintf(out, "  ENTER 2\n");
+    // idx -> local0
+    fprintf(out, "  LDFP -4\n");
+    fprintf(out, "  STFP 0\n");
+    // if idx < 0 trap
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  PUSHI 0\n");
+    fprintf(out, "  LT\n");
+    fprintf(out, "  JZ L_aset_nonneg\n");
+    fprintf(out, "  TRAP 1\n");
+    fprintf(out, "L_aset_nonneg:\n");
+    // keep p on stack; len -> local1
+    fprintf(out, "  LDFP -5\n");
+    fprintf(out, "  DUP\n");
+    fprintf(out, "  LOAD32\n");
+    fprintf(out, "  STFP 1\n");
+    // if idx >= len trap (i < len must hold)
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  LDFP 1\n");
+    fprintf(out, "  LT\n");
+    fprintf(out, "  JNZ L_aset_inrange\n");
+    fprintf(out, "  TRAP 1\n");
+    fprintf(out, "L_aset_inrange:\n");
+    // addr = p + 4 + idx*4
+    fprintf(out, "  ADDI 4\n");
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  PUSHI 4\n");
+    fprintf(out, "  MUL\n");
+    fprintf(out, "  ADD\n");
+    // store v
+    fprintf(out, "  LDFP -3\n");
+    fprintf(out, "  STORE32\n");
+    fprintf(out, "  PUSHI 0\n");
+    fprintf(out, "  RET 3\n\n");
+  }
 
   // user functions
   for (size_t i = 0; i < funcs->len; i++) {
