@@ -11,10 +11,42 @@ https://nickzinn.github.io/zmanLang/
 
 ## Language, [ZmanLang](spec-lang.md)
 A C-style, implicitly typed, sort-of toy language but relatively complete with functions, arrays, and strings.
-Example:
+Cannoical Example:
 ```
 print("Hello, World!\n");
 ```
+Sort Example:
+```
+func swap(arr[], i, j) {
+  let tmp := arr[i];
+  arr[i] := arr[j];
+  arr[j] := tmp;
+}
+
+func bubbleSort(arr[]) {
+  let n := length(arr);
+  let i := 0;
+  while (i < n) {
+    let j := 0;
+    while (j < n - 1) {
+      if (arr[j] > arr[j + 1]) {
+        swap(arr, j, j + 1);
+      }
+      j := j + 1;
+    }
+    i := i + 1;
+  }
+}
+
+
+let data := {-1,5,4, -3, 8, 7};
+println(data);
+bubbleSort(data);
+println(data);
+```
+
+I classify it as a toy language because it doesn't implement floating point math (only integer), data structures and garbage collection.  Currently dynamic memory allocation just grows the heap via a bump allocator, which is fast and suitable for small scripts.
+
 
 ## Assembly Language, [StackVM-32 ASM](spec-assembler.md)
 32-bit, stack-based assembly language with support for directives and labels.
