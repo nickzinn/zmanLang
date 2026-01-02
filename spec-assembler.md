@@ -130,6 +130,10 @@ buf:
 
 Align current section offset to n bytes (n is power of 2).
 
+Notes:
+    •    Alignment is not required for VM correctness: 32-bit loads/stores are defined in terms of little-endian bytes.
+    •    This directive is primarily for layout control / readability (and for toolchain compatibility with code that expects word-aligned labels).
+
 .code
 .align 4
 

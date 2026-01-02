@@ -742,7 +742,7 @@ void emit_v0_asm(ByteBuf* out, const StmtList* stmts, const StrPool* sp, const G
   fprintf(out, "  HALT\n\n");
 
   fprintf(out, ".data\n");
-  fprintf(out, "  .align 4\n\n");
+  fprintf(out, "\n");
 
   // globals
   for (size_t i = 0; i < globals->len; i++) {
@@ -759,7 +759,7 @@ void emit_v0_asm(ByteBuf* out, const StmtList* stmts, const StrPool* sp, const G
     if (!emit_bytes_as_ascii(out, s->bytes.data, s->bytes.len)) {
       emit_bytes_as_byte_directives(out, s->bytes.data, s->bytes.len);
     }
-    fprintf(out, "  .align 4\n\n");
+    fprintf(out, "\n");
   }
 
   fprintf(out, ".end\n");
