@@ -2,6 +2,10 @@
 
 Inspired by reading Crafting Interpreters by Robert Nystrom, I designed a custom high level language and assembly language and built a compiler, assembler, virtual machine, and disassembler. Compatible with WebAssembly (WASM) so it runs in the browser (VM compiled to WASM). All implemented in low level C. Built with help from GitHub Copilot Agent.
 
+## Live demo
+
+https://nickzinn.github.io/zmanLang/
+
 
 ## Language, [ZmanLang](spec-lang.md)
 A C-style, implicitly typed, sort-of toy language but relatively complete with functions, arrays, and strings.
@@ -67,6 +71,21 @@ make run PROG=examples/test1.asm
 make disasm ZVM=program.zvm
 
 make web          # build WebAssembly bundles (requires emcc)
+```
+
+## Deploy to GitHub Pages
+
+This repo deploys the web harness in `examples/web` to GitHub Pages using a GitHub Actions workflow.
+
+- One-time setup (repo settings): Settings → Pages → Source: GitHub Actions
+- Deploys automatically on push to `main` (or you can manually run the workflow from the Actions tab)
+- The workflow builds the WASM bundle (Emscripten) and publishes the contents of `examples/web`
+
+Local build (optional):
+
+```bash
+make web
+cd examples/web && python3 -m http.server 8000
 ```
 
 
