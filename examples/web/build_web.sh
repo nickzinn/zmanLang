@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Builds the StackVM-32 interpreter to WebAssembly via Emscripten.
-# Output: examples/web/svm_vm.js + examples/web/svm_vm.wasm
-# Also copies ../../program.zvm into examples/web/program.zvm for the harness.
+# Builds the StackVM-32 toolchain to WebAssembly via Emscripten.
+# Output: examples/web/svm_vm.js + examples/web/svm_vm.wasm (and assembler/compiler modules).
+# The harness compiles/assembles/runs entirely in-memory; it only needs a default ZManLang
+# source file (program.zm) to prepopulate the editor.
 
 cd "$(dirname "$0")"
 
@@ -85,16 +86,9 @@ emcc \
   -s EXPORTED_RUNTIME_METHODS='["HEAPU8"]' \
   -o zmc.js
 
-# Provide a default program for the harness.
-# In CI / fresh clones, ../../program.zvm may not exist (it's often generated).
-# If it exists, prefer it; otherwise keep the repo's examples/web/program.zvm.
-if [[ -f ../../program.zvm ]]; then
-  cp -f ../../program.zvm ./program.zvm
-fi
-cp -f ../../examples/test1.asm ./program.asm
+# Provide a default program for the harness (source prefill only).
 cp -f ../../examples/web_sample.zm ./program.zm
 
 echo "built: examples/web/svm_vm.js (+ wasm), examples/web/svm_asm.js (+ wasm), examples/web/zmc.js (+ wasm)"
-echo "copied: examples/web/program.zvm and examples/web/program.asm"
 echo "serve:  cd examples/web && python3 -m http.server 8000"
 echo "open:   http://localhost:8000"

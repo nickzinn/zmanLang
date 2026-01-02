@@ -1,2 +1,10 @@
 svm_vm.js
 svm_vm.wasm
+svm_asm.js
+svm_asm.wasm
+zmc.js
+zmc.wasm
+
+# Optional locally generated artifacts (not required by the harness)
+program.asm
+program.zvm

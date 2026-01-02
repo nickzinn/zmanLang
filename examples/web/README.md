@@ -16,8 +16,6 @@ This generates:
 - `svm_asm.wasm`
 - `zmc.js`
 - `zmc.wasm`
-- `program.zvm` (copied from repo root)
-- `program.asm` (copied from `examples/test1.asm`)
 - `program.zm` (copied from `examples/web_sample.zm`)
 
 ## Run
@@ -30,9 +28,7 @@ Then open:
 
 - `http://localhost:8000`
 
-Click **Run program.zvm** and the VM output should appear in the page.
-
-Click **Assemble+Run** to assemble in the browser (no file I/O) from the Assembly Source textarea contents (starts empty), then execute the resulting container via the VM module.
+Click **Assemble+Run** to assemble in the browser (no file I/O) from the Assembly Source textarea contents, then execute the resulting container via the VM module.
 
 Click **Compile+Assemble+Run program.zm** to compile ZManLang source to StackVM-32 assembly in the browser, then assemble+run it via the other two modules.
 
