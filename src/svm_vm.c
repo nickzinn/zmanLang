@@ -241,11 +241,15 @@ static int vm_verify_code(const uint8_t* code,
   }
 
   // Worst-case allocation: one potential static target per byte of code.
+  // On 64-bit, `code_size` is uint32_t so this can never overflow; keep the
+  // guard for 32-bit targets where size_t is small.
+#if SIZE_MAX <= UINT32_MAX
   if ((size_t)code_size > (SIZE_MAX / sizeof(uint32_t))) {
     if (out_err) *out_err = "code too large (verify targets)";
     free(starts);
     return 0;
   }
+#endif
   const size_t targets_cap = (size_t)code_size;
   if (targets_cap == 0) {
     if (out_err) *out_err = "internal: invalid targets capacity";
