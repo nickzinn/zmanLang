@@ -18,4 +18,4 @@ if (a = c) {
   print("0");
 }
 
-print("\n");
+println("");

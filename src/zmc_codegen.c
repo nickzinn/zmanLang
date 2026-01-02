@@ -24,6 +24,7 @@ typedef enum {
   RT_HELPER_ASET       = 1u << 4,
   RT_HELPER_PRINT_ARR_I32   = 1u << 5,
   RT_HELPER_PRINT_ARR_STR   = 1u << 6,
+  RT_HELPER_PRINTLN_LIT_NL  = 1u << 7,
 } RuntimeHelper;
 
 static void mark_helpers_expr(const Expr* e, CodeGen* cg);
@@ -110,6 +111,20 @@ static void mark_helpers_stmt(const Stmt* st, CodeGen* cg) {
       return;
     case STMT_PRINT:
       cg->used_helpers |= RT_HELPER_PRINT;
+      if (st->v.print.value) {
+        if (st->v.print.value->ty == TY_ARRAY_I32) {
+          cg->used_helpers |= RT_HELPER_PRINT_ARR_I32;
+          cg->used_helpers |= RT_HELPER_AGET;
+        } else if (st->v.print.value->ty == TY_ARRAY_STRING) {
+          cg->used_helpers |= RT_HELPER_PRINT_ARR_STR;
+          cg->used_helpers |= RT_HELPER_AGET;
+        }
+      }
+      mark_helpers_expr(st->v.print.value, cg);
+      return;
+    case STMT_PRINTLN:
+      cg->used_helpers |= RT_HELPER_PRINT;
+      cg->used_helpers |= RT_HELPER_PRINTLN_LIT_NL;
       if (st->v.print.value) {
         if (st->v.print.value->ty == TY_ARRAY_I32) {
           cg->used_helpers |= RT_HELPER_PRINT_ARR_I32;
@@ -437,6 +452,26 @@ static void emit_stmt_asm(ByteBuf* out, const Stmt* st, const Function* cur_fn, 
         fprintf(out, "  CALL __zman_print\n");
         fprintf(out, "  POP\n");
       }
+      return;
+    case STMT_PRINTLN:
+      emit_expr_asm(out, st->v.print.value, cg);
+      if (st->v.print.value->ty == TY_ARRAY_I32) {
+        fprintf(out, "  CALL __zman_print_array_i32\n");
+        fprintf(out, "  POP\n");
+      } else if (st->v.print.value->ty == TY_ARRAY_STRING) {
+        fprintf(out, "  CALL __zman_print_array_string\n");
+        fprintf(out, "  POP\n");
+      } else {
+        if (st->v.print.value->ty == TY_I32) {
+          fprintf(out, "  SYSCALL 8\n");
+        }
+        fprintf(out, "  CALL __zman_print\n");
+        fprintf(out, "  POP\n");
+      }
+      // newline
+      fprintf(out, "  PUSHI __zman_lit_nl\n");
+      fprintf(out, "  CALL __zman_print\n");
+      fprintf(out, "  POP\n");
       return;
     case STMT_RETURN:
       if (!cur_fn) die("internal: return outside function");
@@ -927,6 +962,12 @@ void emit_v0_asm(ByteBuf* out, const StmtList* stmts, const StrPool* sp, const G
     fprintf(out, "__zman_lit_quote:\n");
     fprintf(out, "  .word 1\n");
     fprintf(out, "  .ascii \"\\\"\"\n\n");
+  }
+
+  if (cg.used_helpers & RT_HELPER_PRINTLN_LIT_NL) {
+    fprintf(out, "__zman_lit_nl:\n");
+    fprintf(out, "  .word 1\n");
+    fprintf(out, "  .ascii \"\\n\"\n\n");
   }
 
   // string literals

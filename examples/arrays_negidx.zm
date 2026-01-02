@@ -3,4 +3,4 @@
 let a := [1];
 
 // OOB load (negative index)
-print(text(a[-1]) + "\n");
+println(text(a[-1]));

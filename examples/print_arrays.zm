@@ -1,13 +1,10 @@
 // Exercise builtin print() on arrays.
 
 let a := {1,2,3,4};
-print(a);
-print("\n");
+println(a);
 
 let s := {"hello","world"};
-print(s);
-print("\n");
+println(s);
 
 let e := {};
-print(e);
-print("\n");
+println(e);

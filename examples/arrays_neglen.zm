@@ -3,4 +3,4 @@
 let a := [-1];
 
 // unreachable
-print("unreached\n");
+println("unreached");

@@ -2,4 +2,4 @@
 
 let a := [3];
 
-print(text(a[0]) + "," + text(a[1]) + "," + text(a[2]) + "\n");
+println(text(a[0]) + "," + text(a[1]) + "," + text(a[2]));

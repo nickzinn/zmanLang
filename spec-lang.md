@@ -20,7 +20,7 @@ while (i < length(data)) {
 }
 
 print(data);
-print("\n");
+println(data);
 
 func sum(array[]) {
   let s := 0;
@@ -31,6 +31,9 @@ func sum(array[]) {
 }
 
 print("The sum is " + text(sum(data)) + "\n");
+
+// Equivalent, but cleaner:
+// println("The sum is " + text(sum(data)));
 
 ```
 
@@ -164,9 +167,12 @@ Surface built-ins:
 - `length(x)` -> `integer`
   - If `x` is an array, returns number of elements.
   - If `x` is a string, returns number of bytes.
-- `print(str)` -> `integer`
+- `print(x)` -> `integer`
   - Writes the value to stdout.
-  - If the argument is an `integer`, it is converted via `text(i)` first.
+  - If `x` is an `integer`, it is converted via `text(i)` first.
+- `println(x)` -> `integer`
+  - Identical to `print(x)`, but also writes a single newline character (`"\n"`) after the value.
+  - This is equivalent to `print(x); print("\n");`.
 - `input()` -> `string`
   - Reads a line from stdin (see runtime notes).
 - `number(str)` -> `integer`

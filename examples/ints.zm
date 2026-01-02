@@ -2,21 +2,15 @@
 
 let a := 40;
 let b := 2;
-print(a + b);
-print("\n");
+println(a + b);
 
-print(7 * (3 + 1));
-print("\n");
+println(7 * (3 + 1));
 
-print(7 / 2);
-print("\n");
+println(7 / 2);
 
-print(7 % 2);
-print("\n");
+println(7 % 2);
 
-print(-5 + 2);
-print("\n");
+println(-5 + 2);
 
 // number() parses string to int
-print(number("123") + 1);
-print("\n");
+println(number("123") + 1);

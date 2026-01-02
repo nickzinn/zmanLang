@@ -4,52 +4,52 @@
 // length() on string/array, arrays (alloc/index/store), foreach (in function),
 // recursion, and number(text(x)) roundtrip.
 
-print("kitchen_sink\n");
+println("kitchen_sink");
 
 const c := 7;
-print("c=" + text(c) + "\n");
+println("c=" + text(c));
 
 let x := 1 + 2 * 3;
-print("expr=" + text(x) + "\n");
+println("expr=" + text(x));
 
 let y := (1 + 2) * 3;
-print("expr2=" + text(y) + "\n");
+println("expr2=" + text(y));
 
 let neg := -5;
-print("neg=" + text(neg) + "\n");
+println("neg=" + text(neg));
 
-print("divmod=" + text(17 / 5) + "," + text(17 % 5) + "\n");
+println("divmod=" + text(17 / 5) + "," + text(17 % 5));
 
 if (1 < 2 and 0 < 1) {
-  print("and1\n");
+  println("and1");
 } else {
-  print("bad\n");
+  println("bad");
 }
 
 // Short-circuit tests: RHS would trap if evaluated.
 if (0 and (1 / 0 = 0)) {
-  print("bad\n");
+  println("bad");
 } else {
-  print("sc_and_ok\n");
+  println("sc_and_ok");
 }
 
 if (1 or (1 / 0 = 0)) {
-  print("sc_or_ok\n");
+  println("sc_or_ok");
 } else {
-  print("bad\n");
+  println("bad");
 }
 
 if (!0) {
-  print("not_ok\n");
+  println("not_ok");
 } else {
-  print("bad\n");
+  println("bad");
 }
 
 let s1 := "hi";
 let s2 := "there";
 let s3 := s1 + " " + s2 + "!";
-print(s3 + "\n");
-print("slen=" + text(length(s3)) + "\n");
+println(s3);
+println("slen=" + text(length(s3)));
 
 let a := [5];
 let i := 0;
@@ -58,8 +58,8 @@ while (i < length(a)) {
   i := i + 1;
 }
 
-print("alen=" + text(length(a)) + "\n");
-print(text(a[0]) + "," + text(a[1]) + "," + text(a[2]) + "," + text(a[3]) + "," + text(a[4]) + "\n");
+println("alen=" + text(length(a)));
+println(text(a[0]) + "," + text(a[1]) + "," + text(a[2]) + "," + text(a[3]) + "," + text(a[4]));
 
 let b := a;
 let a2 := [5];
@@ -75,7 +75,7 @@ if (a = a2) {
 } else {
   print("0");
 }
-print("\n");
+println("");
 
 func sum(arr[]) {
   let s := 0;
@@ -216,43 +216,40 @@ func binarySearch(arr[], key) {
   return -1;
 }
 
-print("sumsq=" + text(sum(a)) + "\n");
+println("sumsq=" + text(sum(a)));
 
 let d := {5,1,4,2,8,0,-3,9,7,6,12,-1,3,10,11,-2};
 
 print("sort_input=");
 print(d);
-print("\n");
+println("");
 
 let db := cloneArray(d);
 bubbleSort(db);
 print("bubble=");
-print(db);
-print("\n");
+println(db);
 print("bubble_sorted=");
-if (isSorted(db)) { print("1\n"); } else { print("0\n"); }
+if (isSorted(db)) { println("1"); } else { println("0"); }
 
 let di := cloneArray(d);
 insertionSort(di);
 print("insertion=");
-print(di);
-print("\n");
+println(di);
 print("insertion_sorted=");
-if (isSorted(di)) { print("1\n"); } else { print("0\n"); }
+if (isSorted(di)) { println("1"); } else { println("0"); }
 
 let dq := cloneArray(d);
 quickSort(dq);
 print("quick=");
-print(dq);
-print("\n");
+println(dq);
 print("quick_sorted=");
-if (isSorted(dq)) { print("1\n"); } else { print("0\n"); }
+if (isSorted(dq)) { println("1"); } else { println("0"); }
 
 // Search on sorted array (dq)
-print("search_lin_-2=" + text(linearSearch(dq, -2)) + "\n");
-print("search_bin_-2=" + text(binarySearch(dq, -2)) + "\n");
-print("search_lin_42=" + text(linearSearch(dq, 42)) + "\n");
-print("search_bin_42=" + text(binarySearch(dq, 42)) + "\n");
+println("search_lin_-2=" + text(linearSearch(dq, -2)));
+println("search_bin_-2=" + text(binarySearch(dq, -2)));
+println("search_lin_42=" + text(linearSearch(dq, 42)));
+println("search_bin_42=" + text(binarySearch(dq, 42)));
 
 func fact(n) {
   if (n = 0) {
@@ -262,10 +259,10 @@ func fact(n) {
   }
 }
 
-print("fact6=" + text(fact(6)) + "\n");
+println("fact6=" + text(fact(6)));
 
 let round := number(text(-12345));
-print("round=" + text(round) + "\n");
+println("round=" + text(round));
 
 let e := "x\n";
-print("elen=" + text(length(e)) + "\n");
+println("elen=" + text(length(e)));

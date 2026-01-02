@@ -3,8 +3,8 @@
 // Unspecified elements keep the zero-initialized default.
 let a := {10,20,0,0,7};
 
-print(text(a[0]) + "," + text(a[1]) + "," + text(a[4]) + "\n");
-print(text(length(a)) + "\n");
+println(text(a[0]) + "," + text(a[1]) + "," + text(a[4]));
+println(text(length(a)));
 
 let s := "hi\n";
-print(text(length(s)) + "\n");
+println(text(length(s)));

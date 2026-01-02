@@ -821,8 +821,9 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
     return;
   }
 
-  if (tok_is(p, TOK_IDENT) && ident_is(p, "print")) {
+  if (tok_is(p, TOK_IDENT) && (ident_is(p, "print") || ident_is(p, "println"))) {
     size_t pos = p->cur.pos;
+    const bool is_println = ident_is(p, "println");
     advance(p);
 
     expect(p, TOK_LPAREN, "'('");
@@ -842,7 +843,7 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
 
     Stmt st;
     memset(&st, 0, sizeof(st));
-    st.kind = STMT_PRINT;
+    st.kind = is_println ? STMT_PRINTLN : STMT_PRINT;
     st.pos = pos;
     st.v.print.value = value;
     stmt_list_push(out, st);

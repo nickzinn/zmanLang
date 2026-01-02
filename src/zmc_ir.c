@@ -219,6 +219,7 @@ static void stmt_free(Stmt* st) {
       free_expr(st->v.astore.value);
       return;
     case STMT_PRINT:
+    case STMT_PRINTLN:
       free_expr(st->v.print.value);
       return;
     case STMT_RETURN:

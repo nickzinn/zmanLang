@@ -20,9 +20,9 @@ func fact(n) {
   }
 }
 
-print(text(add(2, 3)) + "\n");
-print(twice("ha") + "\n");
-print(text(inc2(40)) + "\n");
-print(text(fact(5)) + "\n");
+println(text(add(2, 3)));
+println(twice("ha"));
+println(text(inc2(40)));
+println(text(fact(5)));
 
 add(1, 2);

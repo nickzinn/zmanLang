@@ -6,4 +6,4 @@ let a := {1,2};
 a[2] := 99;
 
 // unreachable
-print("unreached\n");
+println("unreached");
