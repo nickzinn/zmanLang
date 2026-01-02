@@ -1,0 +1,19 @@
+// Exercise builtin print() on arrays.
+
+let a := [4];
+a[0] := 1;
+a[1] := 2;
+a[2] := 3;
+a[3] := 4;
+print(a);
+print("\n");
+
+let s := [2];
+s[0] := "hello";
+s[1] := "world";
+print(s);
+print("\n");
+
+let e := [0];
+print(e);
+print("\n");

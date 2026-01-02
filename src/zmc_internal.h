@@ -160,6 +160,7 @@ typedef enum {
   TY_I32 = 2,
   TY_BOOL = 3,
   TY_ARRAY_I32 = 4,
+  TY_ARRAY_STRING = 5,
 } Type;
 
 typedef enum {

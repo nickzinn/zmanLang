@@ -112,6 +112,7 @@ const char* type_name(Type t) {
     case TY_I32: return "i32";
     case TY_BOOL: return "bool";
     case TY_ARRAY_I32: return "array[i32]";
+    case TY_ARRAY_STRING: return "array[string]";
     default: return "<unknown>";
   }
 }

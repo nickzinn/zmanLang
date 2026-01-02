@@ -22,6 +22,8 @@ typedef enum {
   RT_HELPER_ARRAY_ALLOC= 1u << 2,
   RT_HELPER_AGET       = 1u << 3,
   RT_HELPER_ASET       = 1u << 4,
+  RT_HELPER_PRINT_ARR_I32   = 1u << 5,
+  RT_HELPER_PRINT_ARR_STR   = 1u << 6,
 } RuntimeHelper;
 
 static void mark_helpers_expr(const Expr* e, CodeGen* cg);
@@ -101,6 +103,15 @@ static void mark_helpers_stmt(const Stmt* st, CodeGen* cg) {
       return;
     case STMT_PRINT:
       cg->used_helpers |= RT_HELPER_PRINT;
+      if (st->v.print.value) {
+        if (st->v.print.value->ty == TY_ARRAY_I32) {
+          cg->used_helpers |= RT_HELPER_PRINT_ARR_I32;
+          cg->used_helpers |= RT_HELPER_AGET;
+        } else if (st->v.print.value->ty == TY_ARRAY_STRING) {
+          cg->used_helpers |= RT_HELPER_PRINT_ARR_STR;
+          cg->used_helpers |= RT_HELPER_AGET;
+        }
+      }
       mark_helpers_expr(st->v.print.value, cg);
       return;
     case STMT_RETURN:
@@ -394,11 +405,19 @@ static void emit_stmt_asm(ByteBuf* out, const Stmt* st, const Function* cur_fn, 
     }
     case STMT_PRINT:
       emit_expr_asm(out, st->v.print.value, cg);
-      if (st->v.print.value->ty == TY_I32) {
-        fprintf(out, "  SYSCALL 8\n");
+      if (st->v.print.value->ty == TY_ARRAY_I32) {
+        fprintf(out, "  CALL __zman_print_array_i32\n");
+        fprintf(out, "  POP\n");
+      } else if (st->v.print.value->ty == TY_ARRAY_STRING) {
+        fprintf(out, "  CALL __zman_print_array_string\n");
+        fprintf(out, "  POP\n");
+      } else {
+        if (st->v.print.value->ty == TY_I32) {
+          fprintf(out, "  SYSCALL 8\n");
+        }
+        fprintf(out, "  CALL __zman_print\n");
+        fprintf(out, "  POP\n");
       }
-      fprintf(out, "  CALL __zman_print\n");
-      fprintf(out, "  POP\n");
       return;
     case STMT_RETURN:
       if (!cur_fn) die("internal: return outside function");
@@ -531,6 +550,127 @@ void emit_v0_asm(ByteBuf* out, const StmtList* stmts, const StrPool* sp, const G
     fprintf(out, "  ADDI 4\n");
     fprintf(out, "  SWAP\n");
     fprintf(out, "  SYSCALL 4\n");
+    fprintf(out, "  PUSHI 0\n");
+    fprintf(out, "  RET 1\n\n");
+  }
+
+  if (cg.used_helpers & RT_HELPER_PRINT_ARR_I32) {
+    // __zman_print_array_i32(p) -> 0
+    // Prints array as: [1,2,3]
+    // Args: p at [fp-3]
+    fprintf(out, "__zman_print_array_i32:\n");
+    fprintf(out, "  ENTER 3\n");
+    // locals: 0 idx, 1 len, 2 arr
+    fprintf(out, "  LDFP -3\n");
+    fprintf(out, "  STFP 2\n");
+    // len
+    fprintf(out, "  LDFP 2\n");
+    fprintf(out, "  LOAD32\n");
+    fprintf(out, "  STFP 1\n");
+    // idx = 0
+    fprintf(out, "  PUSHI 0\n");
+    fprintf(out, "  STFP 0\n");
+    // print '['
+    fprintf(out, "  PUSHI __zman_lit_lbrack\n");
+    fprintf(out, "  CALL __zman_print\n");
+    fprintf(out, "  POP\n");
+    fprintf(out, "L_print_arr_i32_head:\n");
+    // if idx < len
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  LDFP 1\n");
+    fprintf(out, "  LT\n");
+    fprintf(out, "  JZ L_print_arr_i32_end\n");
+    // if idx != 0 print ','
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  PUSHI 0\n");
+    fprintf(out, "  EQ\n");
+    fprintf(out, "  JNZ L_print_arr_i32_nocomma\n");
+    fprintf(out, "  PUSHI __zman_lit_comma\n");
+    fprintf(out, "  CALL __zman_print\n");
+    fprintf(out, "  POP\n");
+    fprintf(out, "L_print_arr_i32_nocomma:\n");
+    // elem -> string -> print
+    fprintf(out, "  LDFP 2\n");
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  CALL __zman_aget\n");
+    fprintf(out, "  SYSCALL 8\n");
+    fprintf(out, "  CALL __zman_print\n");
+    fprintf(out, "  POP\n");
+    // idx++
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  PUSHI 1\n");
+    fprintf(out, "  ADD\n");
+    fprintf(out, "  STFP 0\n");
+    fprintf(out, "  JMP L_print_arr_i32_head\n");
+    fprintf(out, "L_print_arr_i32_end:\n");
+    // print ']'
+    fprintf(out, "  PUSHI __zman_lit_rbrack\n");
+    fprintf(out, "  CALL __zman_print\n");
+    fprintf(out, "  POP\n");
+    fprintf(out, "  PUSHI 0\n");
+    fprintf(out, "  RET 1\n\n");
+  }
+
+  if (cg.used_helpers & RT_HELPER_PRINT_ARR_STR) {
+    // __zman_print_array_string(p) -> 0
+    // Prints array as: ["hello","world"]
+    // Args: p at [fp-3]
+    fprintf(out, "__zman_print_array_string:\n");
+    fprintf(out, "  ENTER 3\n");
+    // locals: 0 idx, 1 len, 2 arr
+    fprintf(out, "  LDFP -3\n");
+    fprintf(out, "  STFP 2\n");
+    // len
+    fprintf(out, "  LDFP 2\n");
+    fprintf(out, "  LOAD32\n");
+    fprintf(out, "  STFP 1\n");
+    // idx = 0
+    fprintf(out, "  PUSHI 0\n");
+    fprintf(out, "  STFP 0\n");
+    // print '['
+    fprintf(out, "  PUSHI __zman_lit_lbrack\n");
+    fprintf(out, "  CALL __zman_print\n");
+    fprintf(out, "  POP\n");
+    fprintf(out, "L_print_arr_str_head:\n");
+    // if idx < len
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  LDFP 1\n");
+    fprintf(out, "  LT\n");
+    fprintf(out, "  JZ L_print_arr_str_end\n");
+    // if idx != 0 print ','
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  PUSHI 0\n");
+    fprintf(out, "  EQ\n");
+    fprintf(out, "  JNZ L_print_arr_str_nocomma\n");
+    fprintf(out, "  PUSHI __zman_lit_comma\n");
+    fprintf(out, "  CALL __zman_print\n");
+    fprintf(out, "  POP\n");
+    fprintf(out, "L_print_arr_str_nocomma:\n");
+    // print '"'
+    fprintf(out, "  PUSHI __zman_lit_quote\n");
+    fprintf(out, "  CALL __zman_print\n");
+    fprintf(out, "  POP\n");
+    // elem (string ptr) -> print
+    fprintf(out, "  LDFP 2\n");
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  CALL __zman_aget\n");
+    fprintf(out, "  CALL __zman_print\n");
+    fprintf(out, "  POP\n");
+    // print '"'
+    fprintf(out, "  PUSHI __zman_lit_quote\n");
+    fprintf(out, "  CALL __zman_print\n");
+    fprintf(out, "  POP\n");
+    // idx++
+    fprintf(out, "  LDFP 0\n");
+    fprintf(out, "  PUSHI 1\n");
+    fprintf(out, "  ADD\n");
+    fprintf(out, "  STFP 0\n");
+    fprintf(out, "  JMP L_print_arr_str_head\n");
+    fprintf(out, "L_print_arr_str_end:\n");
+    // print ']'
+    fprintf(out, "  PUSHI __zman_lit_rbrack\n");
+    fprintf(out, "  CALL __zman_print\n");
+    fprintf(out, "  POP\n");
     fprintf(out, "  PUSHI 0\n");
     fprintf(out, "  RET 1\n\n");
   }
@@ -750,6 +890,25 @@ void emit_v0_asm(ByteBuf* out, const StmtList* stmts, const StrPool* sp, const G
     fprintf(out, "  .word 0\n");
   }
   if (globals->len > 0) fprintf(out, "\n");
+
+  // runtime string literals (emitted only if needed)
+  if (cg.used_helpers & (RT_HELPER_PRINT_ARR_I32 | RT_HELPER_PRINT_ARR_STR)) {
+    fprintf(out, "__zman_lit_lbrack:\n");
+    fprintf(out, "  .word 1\n");
+    fprintf(out, "  .ascii \"[\"\n\n");
+
+    fprintf(out, "__zman_lit_rbrack:\n");
+    fprintf(out, "  .word 1\n");
+    fprintf(out, "  .ascii \"]\"\n\n");
+
+    fprintf(out, "__zman_lit_comma:\n");
+    fprintf(out, "  .word 1\n");
+    fprintf(out, "  .ascii \",\"\n\n");
+
+    fprintf(out, "__zman_lit_quote:\n");
+    fprintf(out, "  .word 1\n");
+    fprintf(out, "  .ascii \"\\\"\"\n\n");
+  }
 
   // string literals
   for (size_t i = 0; i < sp->len; i++) {

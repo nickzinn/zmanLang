@@ -40,6 +40,46 @@ static int fn_param_index(Function* f, const char* name, size_t name_len) {
 
 static void set_expr_type(ParseCtx* ctx, Expr* e, Type ty);
 
+static bool is_array_type(Type t) {
+  return t == TY_ARRAY_I32 || t == TY_ARRAY_STRING;
+}
+
+static Type array_elem_type(Type arr_ty) {
+  if (arr_ty == TY_ARRAY_STRING) return TY_STRING;
+  return TY_I32;
+}
+
+static void retype_ident_binding(ParseCtx* ctx, Expr* e, Type new_ty) {
+  if (!e || e->kind != EXPR_IDENT) {
+    zmc_failf("zmc: internal: cannot retype non-identifier expression");
+  }
+  if (!is_array_type(new_ty)) {
+    zmc_failf("zmc: internal: retype_ident_binding expects array type");
+  }
+
+  // Only allow re-typing between array kinds.
+  if (e->ty != 0 && !is_array_type(e->ty)) {
+    zmc_failf("zmc: type error: expected %s, got %s", type_name(new_ty), type_name(e->ty));
+  }
+
+  if (ctx->cur_fn && e->v.ident.ref == REF_LOCAL) {
+    Local* l = locals_find(&ctx->cur_fn->locals, e->v.ident.name, e->v.ident.name_len);
+    if (l) l->ty = new_ty;
+  } else if (ctx->cur_fn && e->v.ident.ref == REF_PARAM) {
+    ctx->cur_fn->param_types[e->v.ident.param_index] = new_ty;
+  } else if (e->v.ident.ref == REF_GLOBAL) {
+    for (size_t i = 0; i < ctx->globals->len; i++) {
+      Global* g = &ctx->globals->items[i];
+      if (strlen(g->name) == e->v.ident.name_len && memcmp(g->name, e->v.ident.name, e->v.ident.name_len) == 0) {
+        g->ty = (int)new_ty;
+        break;
+      }
+    }
+  }
+
+  e->ty = new_ty;
+}
+
 static void require_expr_type(ParseCtx* ctx, Expr* e, Type want, const char* where) {
   if (e->ty == 0) {
     set_expr_type(ctx, e, want);
@@ -190,7 +230,7 @@ static Expr* parse_primary(Parser* p, StrPool* sp, ParseCtx* ctx) {
     if (inner->ty == 0) {
       zmc_failf("zmc: could not infer type for length() argument");
     }
-    if (!(inner->ty == TY_STRING || inner->ty == TY_ARRAY_I32)) {
+    if (!(inner->ty == TY_STRING || inner->ty == TY_ARRAY_I32 || inner->ty == TY_ARRAY_STRING)) {
       zmc_failf("zmc: type error (length() argument): expected string or array, got %s", type_name(inner->ty));
     }
     expect(p, TOK_RPAREN, "')'");
@@ -309,14 +349,14 @@ static Expr* parse_postfix(Parser* p, StrPool* sp, ParseCtx* ctx) {
       advance(p);
 
       if (left->ty == 0) set_expr_type(ctx, left, TY_ARRAY_I32);
-      if (left->ty != TY_ARRAY_I32) {
+      if (!is_array_type(left->ty)) {
         zmc_failf("zmc: type error (index): expected array, got %s", type_name(left->ty));
       }
 
       Expr* e = new_expr(EXPR_INDEX, pos);
       e->v.index.base = left;
       e->v.index.index = idx;
-      e->ty = TY_I32;
+      e->ty = array_elem_type(left->ty);
       left = e;
       continue;
     }
@@ -438,7 +478,7 @@ static Expr* parse_cmp(Parser* p, StrPool* sp, ParseCtx* ctx) {
       if (left->ty != right->ty) {
         zmc_failf("zmc: type error (equality): mismatched types %s and %s", type_name(left->ty), type_name(right->ty));
       }
-      if (!(left->ty == TY_I32 || left->ty == TY_BOOL || left->ty == TY_STRING || left->ty == TY_ARRAY_I32)) {
+      if (!(left->ty == TY_I32 || left->ty == TY_BOOL || left->ty == TY_STRING || left->ty == TY_ARRAY_I32 || left->ty == TY_ARRAY_STRING)) {
         zmc_failf("zmc: type error (equality): unsupported type %s", type_name(left->ty));
       }
     }
@@ -630,12 +670,15 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
     advance(p);
 
     Expr* array = parse_expr(p, sp, ctx);
-    require_expr_type(ctx, array, TY_ARRAY_I32, "foreach array");
+    if (array->ty == 0) set_expr_type(ctx, array, TY_ARRAY_I32);
+    if (!is_array_type(array->ty)) {
+      zmc_failf("zmc: type error (foreach array): expected array, got %s", type_name(array->ty));
+    }
 
     // Bind loop variable after parsing the array expression so it isn't visible there.
     int var_slot = ctx->cur_fn->nlocals;
     Local* l = locals_add(&ctx->cur_fn->locals, name_ptr, name_len, false, var_slot);
-    l->ty = TY_I32;
+    l->ty = array_elem_type(array->ty);
     ctx->cur_fn->nlocals++;
 
     // Internal locals: evaluated array pointer and current index.
@@ -691,8 +734,11 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
       slot = ctx->cur_fn->nlocals;
       Local* l = locals_add(&ctx->cur_fn->locals, name_ptr, name_len, is_const, slot);
       if (hint_array) {
-        require_expr_type(ctx, value, TY_ARRAY_I32, "array binding initializer");
-        l->ty = TY_ARRAY_I32;
+        if (value->ty == 0) set_expr_type(ctx, value, TY_ARRAY_I32);
+        if (!is_array_type(value->ty)) {
+          zmc_failf("zmc: type error (array binding initializer): expected array, got %s", type_name(value->ty));
+        }
+        l->ty = value->ty;
       } else {
         l->ty = value->ty;
       }
@@ -700,8 +746,11 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
     } else {
       Global* g = globals_add(ctx->globals, name_ptr, name_len, is_const);
       if (hint_array) {
-        require_expr_type(ctx, value, TY_ARRAY_I32, "array binding initializer");
-        globals_set_type(g, TY_ARRAY_I32);
+        if (value->ty == 0) set_expr_type(ctx, value, TY_ARRAY_I32);
+        if (!is_array_type(value->ty)) {
+          zmc_failf("zmc: type error (array binding initializer): expected array, got %s", type_name(value->ty));
+        }
+        globals_set_type(g, value->ty);
       } else {
         globals_set_type(g, value->ty);
       }
@@ -731,8 +780,8 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
     advance(p);
 
     Expr* value = parse_expr(p, sp, ctx);
-    if (!(value->ty == TY_STRING || value->ty == TY_I32 || value->ty == 0)) {
-      zmc_failf("zmc: type error (print() argument): expected string or i32, got %s", type_name(value->ty));
+    if (!(value->ty == TY_STRING || value->ty == TY_I32 || value->ty == TY_ARRAY_I32 || value->ty == TY_ARRAY_STRING || value->ty == 0)) {
+      zmc_failf("zmc: type error (print() argument): expected string, i32, or array, got %s", type_name(value->ty));
     }
     if (value->ty == 0) set_expr_type(ctx, value, TY_I32);
 
@@ -763,9 +812,39 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
 
     if (first->kind == EXPR_INDEX) {
       // array[index] := value;
-      require_expr_type(ctx, first->v.index.base, TY_ARRAY_I32, "array store base");
-      require_expr_type(ctx, first->v.index.index, TY_I32, "array store index");
-      require_expr_type(ctx, value, TY_I32, "array store value");
+      Expr* base = first->v.index.base;
+      Expr* index = first->v.index.index;
+      require_expr_type(ctx, index, TY_I32, "array store index");
+
+      Type want_arr = TY_ARRAY_I32;
+      Type want_elem = TY_I32;
+      if (value->ty == 0) {
+        // Default: i32 arrays.
+        set_expr_type(ctx, value, TY_I32);
+      }
+      if (value->ty == TY_STRING) {
+        want_arr = TY_ARRAY_STRING;
+        want_elem = TY_STRING;
+      } else if (value->ty == TY_I32) {
+        want_arr = TY_ARRAY_I32;
+        want_elem = TY_I32;
+      } else {
+        zmc_failf("zmc: type error (array store value): expected string or i32, got %s", type_name(value->ty));
+      }
+
+      if (base->ty == 0) {
+        set_expr_type(ctx, base, want_arr);
+      } else if (base->ty != want_arr) {
+        // Allow re-typing an identifier binding from array[i32] <-> array[string]
+        // when we learn element type from the store.
+        if (base->kind == EXPR_IDENT && is_array_type(base->ty) && is_array_type(want_arr)) {
+          retype_ident_binding(ctx, base, want_arr);
+        } else {
+          zmc_failf("zmc: type error (array store base): expected %s, got %s", type_name(want_arr), type_name(base->ty));
+        }
+      }
+
+      require_expr_type(ctx, value, want_elem, "array store value");
 
       Stmt st;
       memset(&st, 0, sizeof(st));
@@ -926,6 +1005,8 @@ static void parse_func_def(Parser* p, StrPool* sp, ParseCtx* ctx) {
     fn->param_names[i] = (char*)xmalloc(param_lens[i] + 1);
     memcpy(fn->param_names[i], param_ptrs[i], param_lens[i]);
     fn->param_names[i][param_lens[i]] = 0;
+    // Array parameters are hinted as arrays, but element type is inferred.
+    // Default to array[i32] unless later stores/uses re-type it.
     if (param_is_array && param_is_array[i]) fn->param_types[i] = TY_ARRAY_I32;
   }
   free(param_ptrs);

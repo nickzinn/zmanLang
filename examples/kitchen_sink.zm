@@ -85,21 +85,6 @@ func sum(arr[]) {
   return s;
 }
 
-func printArray(arr[]) {
-  print("[");
-  let first := 1;
-  foreach(v, arr) {
-    if (first) {
-      first := 0;
-    } else {
-      print(",");
-    }
-    print(text(v));
-  }
-  print("]\n");
-  return 0;
-}
-
 func cloneArray(src[]) {
   let n := length(src);
   let dst := [n];
@@ -252,26 +237,30 @@ d[14] := 11;
 d[15] := -2;
 
 print("sort_input=");
-printArray(d);
+print(d);
+print("\n");
 
 let db := cloneArray(d);
 bubbleSort(db);
 print("bubble=");
-printArray(db);
+print(db);
+print("\n");
 print("bubble_sorted=");
 if (isSorted(db)) { print("1\n"); } else { print("0\n"); }
 
 let di := cloneArray(d);
 insertionSort(di);
 print("insertion=");
-printArray(di);
+print(di);
+print("\n");
 print("insertion_sorted=");
 if (isSorted(di)) { print("1\n"); } else { print("0\n"); }
 
 let dq := cloneArray(d);
 quickSort(dq);
 print("quick=");
-printArray(dq);
+print(dq);
+print("\n");
 print("quick_sorted=");
 if (isSorted(dq)) { print("1\n"); } else { print("0\n"); }
 

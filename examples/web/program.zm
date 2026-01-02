@@ -8,21 +8,8 @@ while (i < length(data)) {
     i := i + 1;
 }
 
-func printArray(array[]) {
-  print("[");
-  let first := true;
-  foreach(v, array) {
-    if (first) {
-      first := false;
-    } else {
-      print(", ");
-    }
-    print(text(v));
-  }
-  print("]\n");
-  return 0;
-}
-printArray(data);
+print(data);
+print("\n");
 
 func sum(array[]) {
   let s := 0;
