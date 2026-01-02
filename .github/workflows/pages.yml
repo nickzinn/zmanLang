@@ -25,6 +25,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+
+      - name: Build web/WASM bundle
+        run: |
+          cd examples/web
+          ./build_web.sh
+
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
