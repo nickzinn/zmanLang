@@ -2,7 +2,7 @@
 
 Inspired over the holidays by reading [Crafting Interpreters](https://craftinginterpreters.com) by Robert Nystrom, I designed a custom high level language and assembly language and built a compiler, assembler, virtual machine, and disassembler. Compatible with WebAssembly (WASM) so it runs in the browser (VM compiled to WASM). All implemented in low level C. Built with help from GitHub Copilot Agent.  
 
-I say inspired by Nystom's book, but of course I am old school and learned compiler design from the [Red Dragan book](https://en.wikipedia.org/wiki/Compilers:_Principles,_Techniques,_and_Tools).  The assembler code I learned back in the day on 6502 and Motorolla 68k.  
+I say inspired by Nystom's book, but of course I am old school and learned compiler design from the [Red Dragon book](https://en.wikipedia.org/wiki/Compilers:_Principles,_Techniques,_and_Tools).  The assembler code I learned back in the day on 6502 and Motorolla 68k.  
 
 ## Live demo
 
