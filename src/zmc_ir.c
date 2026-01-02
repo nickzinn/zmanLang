@@ -139,6 +139,10 @@ void free_expr(Expr* e) {
       for (size_t i = 0; i < e->v.call.argc; i++) free_expr(e->v.call.args[i]);
       free(e->v.call.args);
       break;
+    case EXPR_ARRAY_LIT:
+      for (size_t i = 0; i < e->v.array_lit.len; i++) free_expr(e->v.array_lit.elems[i]);
+      free(e->v.array_lit.elems);
+      break;
     case EXPR_ARRAY_ALLOC:
     case EXPR_LENGTH:
       free_expr(e->v.unary.inner);

@@ -120,6 +120,16 @@ func_def       := "func" identifier "(" [ params ] ")" func_body
 params         := param { "," param }
 param          := binding
 func_body      := block | ":=" expr ";"
+
+// Expressions (selected)
+//
+// Array allocation: allocates a zero-initialized array of length n
+//   expr := "[" expr "]"
+//
+// Array literal: allocates and initializes an array from the listed elements
+//   expr := "{" [ expr { "," expr } ] "}"
+//
+// In v0 (zmc), array literals currently support `integer` and `string` elements.
 ```
 
 ## Operators and precedence

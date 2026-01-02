@@ -179,6 +179,7 @@ typedef enum {
   EXPR_IDENT,
   EXPR_CALL,
   EXPR_ARRAY_ALLOC,
+  EXPR_ARRAY_LIT,
   EXPR_INDEX,
   EXPR_LENGTH,
   EXPR_ADD,
@@ -225,6 +226,10 @@ struct Expr {
       size_t argc;
       Function* fn; // resolved callee
     } call; // EXPR_CALL
+    struct {
+      Expr** elems;
+      size_t len;
+    } array_lit; // EXPR_ARRAY_LIT
     struct {
       Expr* base;
       Expr* index;

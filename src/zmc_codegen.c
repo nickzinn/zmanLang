@@ -46,6 +46,13 @@ static void mark_helpers_expr(const Expr* e, CodeGen* cg) {
       cg->used_helpers |= RT_HELPER_ARRAY_ALLOC;
       mark_helpers_expr(e->v.unary.inner, cg);
       return;
+    case EXPR_ARRAY_LIT:
+      cg->used_helpers |= RT_HELPER_ARRAY_ALLOC;
+      cg->used_helpers |= RT_HELPER_ASET;
+      for (size_t i = 0; i < e->v.array_lit.len; i++) {
+        mark_helpers_expr(e->v.array_lit.elems[i], cg);
+      }
+      return;
     case EXPR_INDEX:
       cg->used_helpers |= RT_HELPER_AGET;
       mark_helpers_expr(e->v.index.base, cg);
@@ -245,6 +252,18 @@ static void emit_expr_asm(ByteBuf* out, const Expr* e, CodeGen* cg) {
     case EXPR_ARRAY_ALLOC:
       emit_expr_asm(out, e->v.unary.inner, cg);
       fprintf(out, "  CALL __zman_array_alloc\n");
+      return;
+    case EXPR_ARRAY_LIT:
+      // Stack effect: pushes pointer to the newly allocated array.
+      fprintf(out, "  PUSHI %u\n", (unsigned)e->v.array_lit.len);
+      fprintf(out, "  CALL __zman_array_alloc\n");
+      for (size_t i = 0; i < e->v.array_lit.len; i++) {
+        fprintf(out, "  DUP\n");
+        fprintf(out, "  PUSHI %u\n", (unsigned)i);
+        emit_expr_asm(out, e->v.array_lit.elems[i], cg);
+        fprintf(out, "  CALL __zman_aset\n");
+        fprintf(out, "  POP\n");
+      }
       return;
     case EXPR_INDEX:
       emit_expr_asm(out, e->v.index.base, cg);

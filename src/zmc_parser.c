@@ -164,6 +164,55 @@ static bool parse_binding_suffix_array(Parser* p) {
 }
 
 static Expr* parse_primary(Parser* p, StrPool* sp, ParseCtx* ctx) {
+  // Array literal: {e1, e2, ...}
+  // Note: this is only reachable in expression context; statement blocks are handled in parse_stmt/parse_block.
+  if (tok_is(p, TOK_LBRACE)) {
+    size_t pos = p->cur.pos;
+    advance(p);
+
+    Expr* e = new_expr(EXPR_ARRAY_LIT, pos);
+    e->v.array_lit.elems = NULL;
+    e->v.array_lit.len = 0;
+
+    Type elem_ty = 0;
+    if (!tok_is(p, TOK_RBRACE)) {
+      for (;;) {
+        Expr* it = parse_expr(p, sp, ctx);
+
+        // Infer the element type from the first typed element.
+        if (elem_ty == 0 && it->ty != 0) elem_ty = it->ty;
+
+        size_t idx = e->v.array_lit.len++;
+        e->v.array_lit.elems = (Expr**)xrealloc(e->v.array_lit.elems, e->v.array_lit.len * sizeof(Expr*));
+        e->v.array_lit.elems[idx] = it;
+
+        if (tok_is(p, TOK_COMMA)) {
+          advance(p);
+          continue;
+        }
+        break;
+      }
+    }
+
+    expect(p, TOK_RBRACE, "'}'");
+    advance(p);
+
+    // Default `{}` to an empty i32 array.
+    if (elem_ty == 0) elem_ty = TY_I32;
+
+    if (!(elem_ty == TY_I32 || elem_ty == TY_STRING)) {
+      zmc_failf("zmc: type error (array literal): expected i32 or string elements, got %s", type_name(elem_ty));
+    }
+
+    // Enforce element types.
+    for (size_t i = 0; i < e->v.array_lit.len; i++) {
+      require_expr_type(ctx, e->v.array_lit.elems[i], elem_ty, "array literal element");
+    }
+
+    e->ty = (elem_ty == TY_STRING) ? TY_ARRAY_STRING : TY_ARRAY_I32;
+    return e;
+  }
+
   // Array allocation: [n]
   if (tok_is(p, TOK_LBRACK)) {
     size_t pos = p->cur.pos;

@@ -1,10 +1,7 @@
 // Arrays: allocation, indexing, and length()
 
-let a := [5];
-
-a[0] := 10;
-a[1] := 20;
-a[4] := 7;
+// Unspecified elements keep the zero-initialized default.
+let a := {10,20,0,0,7};
 
 print(text(a[0]) + "," + text(a[1]) + "," + text(a[4]) + "\n");
 print(text(length(a)) + "\n");

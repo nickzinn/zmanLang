@@ -1,10 +1,6 @@
 // Arrays: bounds check should trap on i >= len.
 
-let a := [2];
-
-// valid stores
-a[0] := 1;
-a[1] := 2;
+let a := {1,2};
 
 // OOB store (len=2, max index=1)
 a[2] := 99;

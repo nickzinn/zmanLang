@@ -1,8 +1,9 @@
-// Exercise builtin print() on arrays.
+// Array literals: {e1, e2, ...}
 
-let a := {1,2,3,4};
-print(a);
+let d := {5,1,4,2,8};
+print(d);
 print("\n");
+print(text(d[2]) + "\n");
 
 let s := {"hello","world"};
 print(s);
