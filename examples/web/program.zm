@@ -1,13 +1,4 @@
-println("Hello world!");
-println("Lets play with arrays!");
-
-let data := [5];
-let i := 0;
-while (i < length(data)) {
-    data[i] := i;
-    i := i + 1;
-}
-
+let data := {-1,5,4, -3, 8, 7};
 println(data);
 
 func sum(array[]) {
@@ -19,3 +10,24 @@ func sum(array[]) {
 }
 
 println("The sum is " + text(sum(data)));
+
+func bubbleSort(arr[]) {
+  let n := length(arr);
+  let i := 0;
+  while (i < n) {
+    let j := 0;
+    while (j < n - 1) {
+      if (arr[j] > arr[j + 1]) {
+        let tmp := arr[j];
+        arr[j] := arr[j +1];
+        arr[j+1] := tmp;
+      }
+      j := j + 1;
+    }
+    i := i + 1;
+  }
+}
+
+bubbleSort(data);
+print("Sorted: ");
+println(data);
