@@ -17,12 +17,6 @@ print("Hello, World!\n");
 ```
 Sort Example:
 ```
-func swap(arr[], i, j) {
-  let tmp := arr[i];
-  arr[i] := arr[j];
-  arr[j] := tmp;
-}
-
 func bubbleSort(arr[]) {
   let n := length(arr);
   let i := 0;
@@ -30,14 +24,15 @@ func bubbleSort(arr[]) {
     let j := 0;
     while (j < n - 1) {
       if (arr[j] > arr[j + 1]) {
-        swap(arr, j, j + 1);
+        let tmp := arr[j];
+        arr[j] := arr[j +1];
+        arr[j+1] := tmp;
       }
       j := j + 1;
     }
     i := i + 1;
   }
 }
-
 
 let data := {-1,5,4, -3, 8, 7};
 println(data);
