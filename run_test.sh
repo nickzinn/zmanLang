@@ -184,6 +184,7 @@ run_one_zmc arrays_lit
 run_one_zmc foreach
 run_one_zmc kitchen_sink
 run_one_zmc print_arrays
+run_one_zmc implicit_return
 
 # Array trap behavior (bounds/len checks): should trap with TRAP u16 code=1.
 run_one_zmc_expect_trap arrays_oob 0x00000001 TRAP

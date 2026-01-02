@@ -573,9 +573,9 @@ static void emit_function_asm(ByteBuf* out, const Function* fn, CodeGen* cg) {
   fprintf(out, "%s:\n", fn->label);
   fprintf(out, "  ENTER %d\n", fn->nlocals);
   emit_stmt_list_asm(out, fn->body, fn, cg);
-  // Should be unreachable (parser enforces at least one return), but keep a
-  // hard runtime failure in case control falls off the end.
-  fprintf(out, "  TRAP 1\n");
+  // Implicit return when control falls off the end.
+  fprintf(out, "  PUSHI 0\n");
+  fprintf(out, "  RET %zu\n", fn->argc);
 }
 
 void emit_v0_asm(ByteBuf* out, const StmtList* stmts, const StrPool* sp, const Globals* globals, const FuncTable* funcs) {

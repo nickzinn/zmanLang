@@ -991,21 +991,6 @@ static void parse_stmt(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out) {
   stmt_list_push(out, st);
 }
 
-static bool stmt_list_has_return(const StmtList* s) {
-  for (size_t i = 0; i < s->len; i++) {
-    const Stmt* st = &s->items[i];
-    if (st->kind == STMT_RETURN) return true;
-    if (st->kind == STMT_BLOCK && stmt_list_has_return(st->v.block.body)) return true;
-    if (st->kind == STMT_IF) {
-      if (stmt_list_has_return(st->v.if_.then_body)) return true;
-      if (st->v.if_.else_body && stmt_list_has_return(st->v.if_.else_body)) return true;
-    }
-    if (st->kind == STMT_WHILE && stmt_list_has_return(st->v.while_.body)) return true;
-    if (st->kind == STMT_FOREACH && stmt_list_has_return(st->v.foreach_.body)) return true;
-  }
-  return false;
-}
-
 static void parse_func_def(Parser* p, StrPool* sp, ParseCtx* ctx) {
   expect(p, TOK_FUNC, "func");
   advance(p);
@@ -1068,12 +1053,10 @@ static void parse_func_def(Parser* p, StrPool* sp, ParseCtx* ctx) {
   fn->body = parse_block(p, sp, ctx);
   ctx->cur_fn = prev;
 
-  if (!stmt_list_has_return(fn->body)) {
-    zmc_failf("zmc: function '%s' must contain a return statement (v0)", fn->name);
-  }
-  if (fn->ret_type == 0) {
-    zmc_failf("zmc: could not infer return type for function '%s'", fn->name);
-  }
+  // If there are no explicit returns, default to i32 so the function can be
+  // used as a statement (return value ignored). Codegen will emit an implicit
+  // `return 0` if control falls off the end.
+  if (fn->ret_type == 0) fn->ret_type = TY_I32;
 }
 
 void parse_program(Parser* p, StrPool* sp, ParseCtx* ctx, StmtList* out_main) {

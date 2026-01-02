@@ -1,0 +1,12 @@
+// implicit_return.zm - functions may omit explicit return
+
+func maybe(x) {
+  if (x = 0) {
+    return 7;
+  }
+  println("fallthrough");
+  // implicit return 0
+}
+
+println(text(maybe(0)));
+println(text(maybe(1)));

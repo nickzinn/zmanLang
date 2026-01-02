@@ -86,6 +86,7 @@ Note: The v0 reference compiler (`zmc`) currently implements only a subset of th
 
 - `func_def` is supported, but `func_body` must be a `block` (the `:= expr ;` shorthand is not implemented yet).
 - `expr_stmt` is supported.
+- Functions do not require an explicit `return`. If control reaches the end of a function body, `zmc` behaves as if an implicit `return 0;` was present.
 - `foreach` is implemented for arrays (v0): `foreach(v, arrayExpr) { ... }`.
   - Current compiler implementation requires `foreach` to appear inside a `func` (i.e. not at top level).
 
