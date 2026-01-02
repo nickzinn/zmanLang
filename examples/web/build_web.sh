@@ -86,7 +86,11 @@ emcc \
   -o zmc.js
 
 # Provide a default program for the harness.
-cp -f ../../program.zvm ./program.zvm
+# In CI / fresh clones, ../../program.zvm may not exist (it's often generated).
+# If it exists, prefer it; otherwise keep the repo's examples/web/program.zvm.
+if [[ -f ../../program.zvm ]]; then
+  cp -f ../../program.zvm ./program.zvm
+fi
 cp -f ../../examples/test1.asm ./program.asm
 cp -f ../../examples/web_sample.zm ./program.zm
 
