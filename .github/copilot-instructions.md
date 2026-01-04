@@ -1,46 +1,26 @@
-# Copilot instructions for zmanLang / StackVM-32
+# Copilot instructions for zmanLang (StackVM-32 toolchain)
 
-## Big picture
-- This repo is a small C toolchain for a single bytecode format ("ZVM1"):
-  - `bin/svm_asm`: assembles `.asm` → `.zvm` container (code + initial memory image).
-  - `bin/svm_vm`: runs a `.zvm` container (StackVM-32 interpreter).
-  - `bin/svm_disasm`: disassembles `.zvm` and auto-labels branch/call targets.
-- Specs are the source of truth for semantics and encoding:
-  - VM + container format: `spec-vm.md`
-  - Assembler syntax + directives: `spec-assembler.md`
-  - High-level language notes / runtime object layouts: `spec-lang.md`
+## Big picture (what talks to what)
+- Toolchain flow: `zmc` (ZmanLang `.zm` → StackVM-32 `.asm`) → `svm_asm` (`.asm` → ZVM1 `.zvm`) → `svm_vm` (executes `.zvm`). `svm_disasm` goes `.zvm` → readable `.asm` with auto-labels.
+- Specs are the source of truth: `spec-lang.md` (language/runtime), `spec-assembler.md` (syntax/directives), `spec-vm.md` (ISA + ZVM1 container).
 
 ## Critical “keep in sync” areas
-- Opcode tables must match across:
-  - `src/svm_vm.c` (execution + verifier)
-  - `src/svm_disasm.c` (`INSTRS[]` decode table)
-  - `src/svm_asm.c` (mnemonic parsing / encoding)
-- The ZVM container header layout ("ZVM1", version 1, 28-byte header) is implemented in both:
-  - `src/svm_vm.c` (loader)
-  - `src/svm_disasm.c` (loader)
-  - `src/svm_asm.c` (writer)
+- Opcode/encoding tables must match across `src/svm_vm.c` (exec + verifier), `src/svm_asm.c` (mnemonics/encoding), `src/svm_disasm.c` (`INSTRS[]` decode).
+- ZVM1 header layout (magic "ZVM1", version 1, 28-byte header) is implemented in `src/svm_asm.c` (writer) and `src/svm_vm.c` / `src/svm_disasm.c` (loaders).
+- Syscall ABI is part of the VM contract (currently IDs 0–9; see `spec-vm.md` and the header comment in `src/svm_vm.c`). `zmc` emits `SYSCALL 8/9` for `text()`/`number()` (see `src/zmc_codegen.c`).
 
-## Developer workflows (macOS/Unix)
-- Build tools: `make` (default `release`).
-  - `make release|debug|asan|ubsan`
-  - Outputs go to `bin/` and intermediates to `build/`.
-- Run golden tests: `make test` (runs `./run_test.sh`).
-  - `run_test.sh` assembles `examples/test{1,2,3}.asm` → `build/*.zvm` and compares stdout against `tests/expected/*.stdout`.
-  - The assembler prints a status line to stderr; tests silence it (`2>/dev/null`). Preserve this behavior when changing CLI output.
-- Convenience targets:
-  - Assemble+run: `make run PROG=examples/test1.asm` (writes `program.zvm` by default).
-  - Disassemble: `make disasm ZVM=program.zvm`
-  - Static analysis: `make lint` (prefers `clang-tidy`, else `clang --analyze`).
+## Workflows (macOS/Unix)
+- Build: `make release|debug|asan|ubsan` → binaries in `bin/`, objects in `build/`.
+- Golden tests: `make test` (runs `run_test.sh`). Note: tests silence the assembler’s status line by redirecting stderr (`./bin/svm_asm ... 2>/dev/null`); keep stderr behavior stable.
+- Handy targets: `make run PROG=examples/test1.asm` (writes `program.zvm`), `make disasm ZVM=program.zvm`, `make lint`.
 
-## Project-specific implementation conventions
-- Endianness: immediates and LOAD32/STORE32 are little-endian (see `spec-vm.md`; implemented in `src/svm_vm.c`).
-- Control-flow targets are absolute byte offsets into `code` (“addr32”), not instruction indices.
-- The VM does a one-time code verification pass and records instruction starts; dynamic control flow (e.g., `RET`/`CALLI`) must land on verified boundaries.
-- Syscalls are part of the VM ABI (IDs 0–7). Keep any changes consistent with `spec-vm.md` and the comments at the top of `src/svm_vm.c`.
+## Project conventions / sharp edges
+- Endianness: immediates and `LOAD32`/`STORE32` are little-endian (`spec-vm.md`, implemented in `src/svm_vm.c`).
+- Control-flow operands (`addr32`) are absolute *byte offsets* into the code blob (not instruction indices).
+- The VM performs a one-time verification pass and records instruction starts; dynamic control-flow (e.g. `RET`, `CALLI`) must land on verified boundaries.
+- `zmc` pipeline is “parse → AST/IR → emit asm”; see `src/zmc_main.c` + `src/zmc_parser.c` + `src/zmc_codegen.c`.
+- `zmc_codegen.c` emits via `ByteBuf` and intentionally remaps `fprintf/fputs/fputc` to buffer writers; keep that pattern when touching codegen.
 
 ## Web/WASM harness (Emscripten)
-- Build: `make web` (runs `examples/web/build_web.sh`, requires `emcc`).
-- Harness files:
-  - `examples/web/index.html`, `examples/web/harness.js`
-  - Emscripten exports come from C APIs in `src/svm_vm.c` and `src/svm_asm.c` (see `examples/web/README.md`).
-- When adding/changing exported C functions, update `examples/web/build_web.sh` (`-s EXPORTED_FUNCTIONS=...`).
+- `make web` runs `examples/web/build_web.sh`. Browser harness is `examples/web/index.html` + `examples/web/harness.js`.
+- WASM APIs are ptr/len-style exports (documented in `examples/web/README.md`). When adding/changing exports, update `examples/web/build_web.sh` (`-s EXPORTED_FUNCTIONS=...`).
