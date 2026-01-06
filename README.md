@@ -1,6 +1,6 @@
 # ZmanLang
 
-Inspired over the holidays by reading [Crafting Interpreters](https://www.amazon.com/dp/0990582930) by Robert Nystrom, I designed a custom high level language and assembly language and built a compiler, assembler, virtual machine, and disassembler. Compatible with WebAssembly (WASM) so it runs in the browser (VM compiled to WASM). All implemented in low level C. Built with help from GitHub Copilot Agent.  
+Inspired over the holidays by reading [Crafting Interpreters](https://www.amazon.com/dp/0990582930) by Robert Nystrom, I designed a custom high level language and assembly language and built a compiler, assembler, virtual machine, and disassembler. Compatible with WebAssembly (WASM) so it runs in the browser (VM compiled to WASM). All implemented in low level C. ***The goal of this project was to do a very difficult software engineering task using GitHub Copilot Agent Mode.***
 
 I say inspired by Nystom's book, but of course I am old school and learned compiler design from the [Red Dragon book](https://en.wikipedia.org/wiki/Compilers:_Principles,_Techniques,_and_Tools).  The assembler code I learned back in the day on [Z80](https://en.wikipedia.org/wiki/Zilog_Z80) and [Motorola 68k](https://en.wikipedia.org/wiki/Motorola_68000_series).  Implementing a VM with byte-code was new experience for me, and actually the VM is considerably more sophisticated than the high level language.  
 
@@ -44,7 +44,7 @@ I classify it as a toy language because it doesn't implement floating point math
 
 
 ## Assembly Language, [StackVM-32 ASM](spec-assembler.md)
-32-bit, stack-based assembly language with support for directives and labels.   Picked a small instruction set of 50 essential instructions (and one for tail recursion).  Integer math only.
+32-bit, stack-based assembly language with support for directives and labels.   Picked a small instruction set of 50 opcodes (and one for tail recursion).  Easy to handcode and very capable.  Also added 9 syscalls for IO and dynamic memory.
 Example:
 ```
 .code
